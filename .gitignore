@@ -1,0 +1,16 @@
+# Archivos de sistema y compilación
+.dart_tool/
+build/
+android/app/build/
+ios/DerivedData/
+
+# Archivos pesados detectados
+*.hprof
+*.so
+*.apk
+*.dill
+*.symbols
+
+# Logs y temporales
+.gradle/
+captures/

@@ -1,0 +1,66 @@
+name: fly_logicd_logbook_app
+description: Fly Logics Logbook App
+publish_to: "none"
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # 📦 State management
+  provider: ^6.1.2
+
+  # 📦 Almacenamiento simple (idioma, settings, etc.)
+  shared_preferences: ^2.3.3
+
+  # 📦 Web & SVG
+  url_launcher: ^6.3.2
+  flutter_svg: ^2.0.9
+
+  # 📦 Base de datos local (SQLite)
+  sqflite: ^2.3.0
+  path: ^1.9.0
+  path_provider: ^2.1.0
+
+  # 📦 Image picker
+  image_picker: ^1.0.7
+
+  # 📦 Manejo seguro de caracteres Unicode (banderas, emojis, etc.)
+  characters: ^1.3.0
+
+  # 🖋️ Pad de firma y fechas
+  intl: ^0.20.2
+  signature: ^6.3.0
+
+  # 🔥 Firebase (núcleo + autenticación) y Google Sign-In
+  firebase_core: ^4.2.0
+  firebase_auth: ^6.1.1
+  google_sign_in: ^7.2.0
+  device_info_plus: ^12.1.0
+  webview_flutter: ^4.13.0
+  firebase_messaging: ^16.0.3
+  flutter_launcher_icons: ^0.14.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icons/flylogicsicon.png"
+
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icons/
+    - assets/l10n/
+    - assets/background/

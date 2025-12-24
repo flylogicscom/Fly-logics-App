@@ -1,0 +1,71 @@
+plugins {
+    id "com.android.application"
+    id "org.jetbrains.kotlin.android"
+    id "com.google.gms.google-services"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+import java.util.Properties
+
+// Lee versionCode / versionName desde local.properties (opcional)
+def localProps = new Properties()
+def localPropsFile = rootProject.file('local.properties')
+if (localPropsFile.exists()) {
+    localPropsFile.withReader('UTF-8') { localProps.load(it) }
+}
+def flutterVersionCode = (localProps.getProperty('flutter.versionCode') ?: '1').toInteger()
+def flutterVersionName = localProps.getProperty('flutter.versionName') ?: '1.0'
+
+android {
+    namespace "com.flylogicdlogbookapp"
+
+    // Plugins como google_sign_in_android requieren 36
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.flylogicdlogbookapp"
+        minSdkVersion 23
+        targetSdk 36
+        versionCode flutterVersionCode
+         versionName flutterVersionName
+    }
+}
+
+    // Asegura que haya APK en debug y evita minify/shrink
+    buildTypes {
+        debug {
+            debuggable true
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+            shrinkResources false
+        }
+        release {
+            signingConfig signingConfigs.debug   // cámbialo a tu firma cuando firmes release
+            minifyEnabled false
+            shrinkResources false
+        }
+    }
+
+    // Alinea Java/Kotlin (evita el error de JVM target)
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+// Dependencias Kotlin base (las de Firebase/otros las añaden los plugins Flutter)
+dependencies {
+    implementation "org.jetbrains.kotlin:kotlin-stdlib"
+}
+
+// Fuerza Kotlin a JVM 17 para todas las tareas
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+
+// Toolchain recomendada
+kotlin {
+    jvmToolchain(17)
+}

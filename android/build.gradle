@@ -1,0 +1,19 @@
+// android/build.gradle (raíz)
+allprojects {
+  repositories {
+    google()
+    mavenCentral()
+  }
+}
+
+// ✅ Usar buildDir como String (no layout.buildDirectory)
+buildDir = "../build"
+
+subprojects { project ->
+  project.buildDir = "${rootProject.buildDir}/${project.name}"
+  project.evaluationDependsOn(":app")
+}
+
+tasks.register("clean", Delete) {
+  delete rootProject.buildDir
+}

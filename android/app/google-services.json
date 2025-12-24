@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "358305603983",
+    "project_id": "logbook-fly-logic",
+    "storage_bucket": "logbook-fly-logic.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:358305603983:android:51641701a83aa8153babfa",
+        "android_client_info": {
+          "package_name": "com.flylogicdlogbookapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCFR7icd72Dq7M7Z1aHKEny-smLtOw-TQU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
