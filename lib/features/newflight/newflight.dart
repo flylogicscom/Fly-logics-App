@@ -14,6 +14,9 @@ import 'package:fly_logicd_logbook_app/common/app_colors.dart';
 import 'package:fly_logicd_logbook_app/l10n/app_localizations.dart';
 import 'package:fly_logicd_logbook_app/utils/db_helper.dart';
 import 'package:fly_logicd_logbook_app/features/airplanes/airplaneslist.dart';
+import 'package:fly_logicd_logbook_app/features/logs/logs_pagelist.dart';
+import 'package:fly_logicd_logbook_app/features/profile/pilot_data.dart';
+import 'package:fly_logicd_logbook_app/features/profile/crew_data.dart';
 
 import 'package:fly_logicd_logbook_app/utils/country_data.dart' as cdata;
 
@@ -138,6 +141,8 @@ class _NewFlightPageState extends State<NewFlightPage> {
   final List<_CrewEntry> _crewEntries = <_CrewEntry>[];
 
   Future<String?> _pickCrewMemberFromList() async {
+    const String kCreateNewCrew = '__CREATE_NEW_CREW__';
+
     final db = await DBHelper.getDB();
 
     await db.execute('''
@@ -162,17 +167,50 @@ class _NewFlightPageState extends State<NewFlightPage> {
     );
 
     if (!mounted) return null;
-
     final AppLocalizations l = AppLocalizations.of(context);
 
+    // ✅ Si NO hay crew: ofrecer crear
     if (rows.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l.t("no_crew_members_yet"))),
+      final String? choice = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(l.t("crew")),
+          content: Text(l.t("no_crew_members_yet")),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text(l.t("cancel")),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, kCreateNewCrew),
+              child: Text(l.t("add_new_crew_button")),
+            ),
+          ],
+        ),
       );
+
+      if (choice != kCreateNewCrew) return null;
+
+      final dynamic picked = await Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => const CrewData(pickMode: true)),
+      );
+
+      if (!mounted) return null;
+
+      // CrewData(pickMode:true) devuelve un Map del miembro seleccionado
+      if (picked is Map) {
+        final String full = (picked['fullName'] ??
+                '${picked['firstName'] ?? ''} ${picked['lastName'] ?? ''}')
+            .toString()
+            .trim();
+        return full.isEmpty ? null : full;
+      }
+
       return null;
     }
 
-    return showDialog<String>(
+    // ✅ Si HAY crew: lista + opción crear nuevo
+    final String? selected = await showDialog<String>(
       context: context,
       builder: (BuildContext ctx) {
         return AlertDialog(
@@ -181,11 +219,11 @@ class _NewFlightPageState extends State<NewFlightPage> {
           contentPadding: EdgeInsets.zero,
           insetPadding: const EdgeInsets.symmetric(horizontal: 24),
           content: Container(
-            width: 360,
+            width: 380,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(16),
               gradient: LinearGradient(
-                colors: <Color>[AppColors.teal1, AppColors.teal3],
+                colors: <Color>[AppColors.teal1, AppColors.teal2],
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
               ),
@@ -200,29 +238,40 @@ class _NewFlightPageState extends State<NewFlightPage> {
                     l.t("crew"),
                     style: const TextStyle(
                       fontWeight: FontWeight.w600,
-                      fontSize: 18,
+                      fontSize: 16,
                       color: Colors.white,
                     ),
                   ),
                 ),
-                const Divider(height: 1, thickness: 0.5, color: Colors.white24),
+                const Divider(height: 1),
                 Flexible(
                   child: ListView.builder(
                     shrinkWrap: true,
-                    itemCount: rows.length,
-                    itemBuilder: (_, int index) {
-                      final Map<String, Object?> r = rows[index];
+                    itemCount: rows.length + 1,
+                    itemBuilder: (context, index) {
+                      if (index == 0) {
+                        return ListTile(
+                          leading: const Icon(Icons.add, color: Colors.white),
+                          title: Text(
+                            l.t("add_new_crew_button"),
+                            style: const TextStyle(color: Colors.white),
+                          ),
+                          onTap: () => Navigator.of(ctx).pop(kCreateNewCrew),
+                        );
+                      }
+
+                      final r = rows[index - 1];
                       final String first =
                           (r['firstName'] as String? ?? '').trim();
                       final String last =
                           (r['lastName'] as String? ?? '').trim();
-                      final String full = ('$first $last').trim().isEmpty
-                          ? 'Crew Member'
-                          : ('$first $last').trim();
+                      final String full = ('$first $last').trim();
 
                       return ListTile(
-                        title: Text(full,
-                            style: const TextStyle(color: Colors.white)),
+                        title: Text(
+                          full.isEmpty ? 'Crew Member' : full,
+                          style: const TextStyle(color: Colors.white),
+                        ),
                         onTap: () => Navigator.of(ctx).pop(full),
                       );
                     },
@@ -234,9 +283,33 @@ class _NewFlightPageState extends State<NewFlightPage> {
         );
       },
     );
+
+    if (!mounted) return null;
+
+    if (selected == kCreateNewCrew) {
+      final dynamic picked = await Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => const CrewData(pickMode: true)),
+      );
+
+      if (!mounted) return null;
+
+      if (picked is Map) {
+        final String full = (picked['fullName'] ??
+                '${picked['firstName'] ?? ''} ${picked['lastName'] ?? ''}')
+            .toString()
+            .trim();
+        return full.isEmpty ? null : full;
+      }
+      return null;
+    }
+
+    return selected;
   }
 
   bool _loadingExisting = false;
+
+// Mantiene el snapshot original para NO perder claves futuras al editar
+  Map<String, dynamic>? _loadedDataJson;
 
   CrewRoleSelection _roleFromCode(AppLocalizations l, String codeRaw) {
     final code = codeRaw.trim().toUpperCase();
@@ -258,10 +331,10 @@ class _NewFlightPageState extends State<NewFlightPage> {
 
     try {
       // ✅ Requiere DBHelper.getFlightById (te dejo el snippet abajo)
-      final Map<String, Object?>? row =
-          await DBHelper.getFlightById(widget.flightId!);
+      final int? id = widget.flightId;
+      if (id == null) return;
 
-      if (!mounted) return;
+      final row = await DBHelper.getFlightById(id);
 
       if (row == null) {
         final l = AppLocalizations.of(context);
@@ -277,6 +350,12 @@ class _NewFlightPageState extends State<NewFlightPage> {
       if (jsonStr != null && jsonStr.isNotEmpty) {
         final decoded = jsonDecode(jsonStr);
         if (decoded is Map<String, dynamic>) snap = decoded;
+        _loadedDataJson;
+        if (snap == null) {
+          _loadedDataJson = null;
+        } else {
+          _loadedDataJson = Map<String, dynamic>.from(snap);
+        }
       }
 
       // --- Dates (fallback a columnas si no hay JSON)
@@ -343,6 +422,42 @@ class _NewFlightPageState extends State<NewFlightPage> {
           int.tryParse(nightTxt.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
       final int ifrCenti =
           int.tryParse(ifrTxt.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0;
+// --- Section 09: Type times (texto tipo "0,00")
+      final Map? tt = snap?['typeTimes'] as Map?;
+      final int ttCrossCenti =
+          _parseCentiText((tt?[_kTtCross] ?? '0,00').toString());
+      final int ttSoloCenti =
+          _parseCentiText((tt?[_kTtSolo] ?? '0,00').toString());
+      final int ttPicCenti =
+          _parseCentiText((tt?[_kTtPic] ?? '0,00').toString());
+      final int ttSicCenti =
+          _parseCentiText((tt?[_kTtSic] ?? '0,00').toString());
+      final int ttInstReCenti =
+          _parseCentiText((tt?[_kTtInstRe] ?? '0,00').toString());
+      final int ttFlyInstCenti =
+          _parseCentiText((tt?[_kTtFlyInst] ?? '0,00').toString());
+
+// --- Section 10: Takeoffs / Landings
+      final Map? tkl = snap?['takeoffsLandings'] as Map?;
+      final int tkofDay = (tkl?['tkofDay'] as num?)?.toInt() ?? 0;
+      final int tkofNight = (tkl?['tkofNight'] as num?)?.toInt() ?? 0;
+      final int ldgDay = (tkl?['ldgDay'] as num?)?.toInt() ?? 0;
+      final int ldgNight = (tkl?['ldgNight'] as num?)?.toInt() ?? 0;
+
+// --- Section 11: Approaches
+      final Map? app = snap?['approaches'] as Map?;
+      final int appCount = (app?['count'] as num?)?.toInt() ?? 0;
+      final String? appTypeRaw = (app?['type'] as String?)?.trim();
+      final String? appType =
+          (appTypeRaw != null && appTypeRaw.isNotEmpty) ? appTypeRaw : null;
+
+// --- Section 12: Remarks + Tags
+      final Map? rem = snap?['remarks'] as Map?;
+      final String remText = (rem?['text'] ?? '').toString();
+      final List<String> remTags = <String>[
+        for (final t in (rem?['tags'] as List? ?? const <dynamic>[]))
+          t.toString(),
+      ];
 
       // --- Aircraft snapshot (no guardas id, así que usamos 0)
       _SelectedAircraftSummary? selected;
@@ -407,6 +522,18 @@ class _NewFlightPageState extends State<NewFlightPage> {
           _crewEntries
             ..clear()
             ..addAll(crew);
+        } else {
+          final String picCol = (row['pic'] as String? ?? '').trim();
+          if (picCol.isNotEmpty) {
+            _crewEntries
+              ..clear()
+              ..add(
+                _CrewEntry(
+                  role: _roleFromCode(l, 'PIC'),
+                  name: picCol,
+                ),
+              );
+          }
         }
 
         _useUtcTime = useUtc;
@@ -414,9 +541,33 @@ class _NewFlightPageState extends State<NewFlightPage> {
         _timeEndCtrl.text = endT;
         _blockTimeHours = blockHours;
 
-        _condDayCtrl.text = dayTxt;
-        _condNightCtrl.text = nightTxt;
-        _condIfrCtrl.text = ifrTxt;
+        _setCentiCtrl(_condDayCtrl, dayCenti);
+        _setCentiCtrl(_condNightCtrl, nightCenti);
+        _setCentiCtrl(_condIfrCtrl, ifrCenti);
+
+// SECTION 09
+        _setCentiCtrl(_ttCrossCtrl, ttCrossCenti);
+        _setCentiCtrl(_ttSoloCtrl, ttSoloCenti);
+        _setCentiCtrl(_ttPicCtrl, ttPicCenti);
+        _setCentiCtrl(_ttSicCtrl, ttSicCenti);
+        _setCentiCtrl(_ttInstReCtrl, ttInstReCenti);
+        _setCentiCtrl(_ttFlyInstCtrl, ttFlyInstCenti);
+
+// SECTION 10
+        _setIntCtrl(_tkofDayCtrl, tkofDay);
+        _setIntCtrl(_tkofNightCtrl, tkofNight);
+        _setIntCtrl(_ldgDayCtrl, ldgDay);
+        _setIntCtrl(_ldgNightCtrl, ldgNight);
+
+// SECTION 11
+        _setIntCtrl(_approachCountCtrl, appCount);
+        _approachType = appType;
+
+// SECTION 12
+        _remarksCtrl.text = remText;
+        _remarkTags
+          ..clear()
+          ..addAll(remTags);
 
         // flags para que el sync no te rompa day/night al cargar
         _condDayTouched = (dayCenti != totalCenti) || (nightCenti != 0);
@@ -472,6 +623,9 @@ class _NewFlightPageState extends State<NewFlightPage> {
     CrewRoleSelection? selectedRole = initial?.role;
     String? selectedName = initial?.name;
 
+    String pilotButtonLabel =
+        (await _getPilotDisplayName()) ?? l.t("pilot_data");
+
     return showDialog<_CrewEntry>(
       context: context,
       barrierDismissible: false,
@@ -488,7 +642,7 @@ class _NewFlightPageState extends State<NewFlightPage> {
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(16),
                   gradient: LinearGradient(
-                    colors: <Color>[AppColors.teal1, AppColors.teal3],
+                    colors: <Color>[AppColors.teal1, AppColors.teal2],
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                   ),
@@ -542,7 +696,7 @@ class _NewFlightPageState extends State<NewFlightPage> {
                                 padding: const EdgeInsets.symmetric(
                                     horizontal: 10, vertical: 4),
                                 decoration: BoxDecoration(
-                                  color: AppColors.teal5,
+                                  color: AppColors.teal3,
                                   borderRadius: BorderRadius.circular(6),
                                   border:
                                       Border.all(color: Colors.white, width: 1),
@@ -590,7 +744,11 @@ class _NewFlightPageState extends State<NewFlightPage> {
                               onPressed: () async {
                                 final String? name = await _pickPilotName();
                                 if (name != null && mounted) {
-                                  setSB(() => selectedName = name);
+                                  setSB(() {
+                                    selectedName = name;
+                                    pilotButtonLabel =
+                                        name; // ✅ actualiza el texto del botón
+                                  });
                                 }
                               },
                               style: OutlinedButton.styleFrom(
@@ -599,7 +757,7 @@ class _NewFlightPageState extends State<NewFlightPage> {
                                     width: 1.0),
                               ),
                               child: Text(
-                                l.t("pilot_data"),
+                                pilotButtonLabel,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),
@@ -893,16 +1051,9 @@ class _NewFlightPageState extends State<NewFlightPage> {
   void initState() {
     super.initState();
 
-    // ✅ Solo en "nuevo vuelo"
-    if (!_isEdit) {
-      _initDefaultCrew();
-    } else {
-      _loadExistingFlight(); // ✅ En "editar vuelo"
-    }
-    super.initState();
-    _initDefaultCrew();
+    // ---- Behaviors / defaults (no dependen de _isEdit) ----
 
-    // valores iniciales sección 8
+    // Valores iniciales sección 08 (Conditions)
     _setCentiCtrl(_condDayCtrl, 0);
     _setCentiCtrl(_condNightCtrl, 0);
     _setCentiCtrl(_condIfrCtrl, 0);
@@ -911,7 +1062,7 @@ class _NewFlightPageState extends State<NewFlightPage> {
     _attachZeroClearBehavior(_condNightFocus, _condNightCtrl);
     _attachZeroClearBehavior(_condIfrFocus, _condIfrCtrl);
 
-    // valores iniciales sección 9
+    // Valores iniciales sección 09 (Type times)
     _setCentiCtrl(_ttCrossCtrl, 0);
     _setCentiCtrl(_ttSoloCtrl, 0);
     _setCentiCtrl(_ttPicCtrl, 0);
@@ -926,24 +1077,22 @@ class _NewFlightPageState extends State<NewFlightPage> {
     _attachZeroClearBehavior(_ttInstReFocus, _ttInstReCtrl);
     _attachZeroClearBehavior(_ttFlyInstFocus, _ttFlyInstCtrl);
 
-    // valores iniciales sección 10
+    // Valores iniciales sección 10 (Takeoffs / Landings)
     _setIntCtrl(_tkofDayCtrl, 0);
     _setIntCtrl(_tkofNightCtrl, 0);
     _setIntCtrl(_ldgDayCtrl, 0);
     _setIntCtrl(_ldgNightCtrl, 0);
 
-    // valores iniciales sección 11
+    // Valores iniciales sección 11 (Approaches)
     _setIntCtrl(_approachCountCtrl, 0);
     _attachZeroClearIntBehavior(_approachCountFocus, _approachCountCtrl);
 
-    // mantener _approachCount sincronizado si el usuario edita el TextField
-    _approachCountCtrl.addListener(() {});
-
-    // comportamiento: si es 0 al tocar -> limpia; si queda vacío al salir -> vuelve 0
-    _attachZeroClearIntBehavior(_tkofDayFocus, _tkofDayCtrl);
-    _attachZeroClearIntBehavior(_tkofNightFocus, _tkofNightCtrl);
-    _attachZeroClearIntBehavior(_ldgDayFocus, _ldgDayCtrl);
-    _attachZeroClearIntBehavior(_ldgNightFocus, _ldgNightCtrl);
+    // ---- Nuevo vs edición ----
+    if (_isEdit) {
+      _loadExistingFlight(); // edición
+    } else {
+      _initDefaultCrew(); // nuevo vuelo
+    }
   }
 
   Future<void> _initDefaultCrew() async {
@@ -1014,17 +1163,28 @@ class _NewFlightPageState extends State<NewFlightPage> {
       final String toFlagEmoji = _flagForIcao(toIcao);
 
       // Evita el error: double? -> double
-      final double blockHours = _blockTimeHours ?? 0.0;
-      final int blockTimeMinutes = (blockHours * 60).round();
+      final double blockHoursRaw = _blockTimeHours ?? 0.0;
 
-      // PIC (para filtros)
-      String pic = '';
-      for (final e in _crewEntries) {
-        if (e.role.code.trim().toUpperCase() == 'PIC') {
-          pic = e.name.trim();
-          break;
+// Normaliza a centésimas (ej: 1,25) para que guardado/carga/estadísticas sean consistentes
+      final int totalCenti = (blockHoursRaw * 100).round();
+      final double blockHours = totalCenti / 100.0;
+      final int blockTimeMinutes = (blockHours * 60).round();
+      final String blockTimeText = _centiToText(totalCenti);
+
+// PIC (para filtros): PIC / COM / INS cuentan como piloto al mando
+      String firstByRole(String roleCode) {
+        for (final e in _crewEntries) {
+          if (e.role.code.trim().toUpperCase() == roleCode) {
+            final n = e.name.trim();
+            if (n.isNotEmpty) return n;
+          }
         }
+        return '';
       }
+
+      String pic = firstByRole('PIC');
+      if (pic.isEmpty) pic = firstByRole('COM');
+      if (pic.isEmpty) pic = firstByRole('INS');
 
       final bool isSim = (_selectedAircraft?.isSimulator ?? false) ||
           fromIcao == 'SIM' ||
@@ -1048,8 +1208,40 @@ class _NewFlightPageState extends State<NewFlightPage> {
         _flightEndDate.day,
       ).millisecondsSinceEpoch;
 
+      // Normaliza textos centésimas (permite que el usuario haya escrito "1,5" o "1.50")
+      final int condDayCenti = _parseCentiText(_condDayCtrl.text);
+      final int condNightCenti = _parseCentiText(_condNightCtrl.text);
+      final int condIfrCenti = _parseCentiText(_condIfrCtrl.text);
+
+      final int ttCrossCenti = _parseCentiText(_ttCrossCtrl.text);
+      final int ttSoloCenti = _parseCentiText(_ttSoloCtrl.text);
+      final int ttPicCenti = _parseCentiText(_ttPicCtrl.text);
+      final int ttSicCenti = _parseCentiText(_ttSicCtrl.text);
+      final int ttInstReCenti = _parseCentiText(_ttInstReCtrl.text);
+      final int ttFlyInstCenti = _parseCentiText(_ttFlyInstCtrl.text);
+
       // Snapshot completo (puedes ampliar sin tocar el esquema)
       final Map<String, dynamic> dataJson = <String, dynamic>{
+        'conditions': <String, dynamic>{
+          // formato visible (texto)
+          'day': _centiToText(condDayCenti),
+          'night': _centiToText(condNightCenti),
+          'ifr': _centiToText(condIfrCenti),
+
+          // numérico estable para estadísticas/export
+          'dayCenti': condDayCenti,
+          'nightCenti': condNightCenti,
+          'ifrCenti': condIfrCenti,
+
+          // (opcional pero útil) flags para reconstruir UI
+          'touched': <String, dynamic>{
+            'day': _condDayTouched,
+            'night': _condNightTouched,
+            'ifr': _condIfrTouched,
+            'lastEdited': _condLastEdited.name,
+          },
+        },
+
         'v': 1,
         'dates': <String, dynamic>{
           'begin': _flightBeginDate.toIso8601String(),
@@ -1092,20 +1284,82 @@ class _NewFlightPageState extends State<NewFlightPage> {
           'blockHours': blockHours,
           'blockMinutes': blockTimeMinutes,
         },
-        'conditions': <String, dynamic>{
-          'day': _condDayCtrl.text.trim(),
-          'night': _condNightCtrl.text.trim(),
-          'ifr': _condIfrCtrl.text.trim(),
-        },
-        // IMPORTANTE: esto reemplaza a _ttDualCtrl/_ttInstrCtrl/_ttNightCtrl
+// SECTION 09: Flight time types (nuevo esquema)
         'typeTimes': <String, dynamic>{
-          'dual': '',
-          'instr': '',
-          'night': '',
+          _kTtCross: _centiToText(ttCrossCenti),
+          _kTtSolo: _centiToText(ttSoloCenti),
+          _kTtPic: _centiToText(ttPicCenti),
+          _kTtSic: _centiToText(ttSicCenti),
+          _kTtInstRe: _centiToText(ttInstReCenti),
+          _kTtFlyInst: _centiToText(ttFlyInstCenti),
+
+          // numérico estable
+          '${_kTtCross}Centi': ttCrossCenti,
+          '${_kTtSolo}Centi': ttSoloCenti,
+          '${_kTtPic}Centi': ttPicCenti,
+          '${_kTtSic}Centi': ttSicCenti,
+          '${_kTtInstRe}Centi': ttInstReCenti,
+          '${_kTtFlyInst}Centi': ttFlyInstCenti,
+        },
+
+// SECTION 10: Takeoffs / Landings
+        'takeoffsLandings': <String, dynamic>{
+          'tkofDay': _parseIntText(_tkofDayCtrl.text),
+          'tkofNight': _parseIntText(_tkofNightCtrl.text),
+          'ldgDay': _parseIntText(_ldgDayCtrl.text),
+          'ldgNight': _parseIntText(_ldgNightCtrl.text),
+        },
+
+// SECTION 11: Approaches
+        'approaches': <String, dynamic>{
+          'count': _parseIntText(_approachCountCtrl.text),
+          'type': _approachType, // puede ser null
+        },
+
+// SECTION 12: Remarks + Tags
+        'remarks': <String, dynamic>{
+          'text': _remarksCtrl.text.trim(),
+          'tags': List<String>.from(_remarkTags),
         },
 
         'savedAt': nowMs,
       };
+
+// Mantén claves futuras en dataJson al editar (shallow-merge por sección)
+      Map<String, dynamic> finalJson = dataJson;
+      if (_isEdit && _loadedDataJson != null) {
+        final base = Map<String, dynamic>.from(_loadedDataJson!);
+
+        void mergeSection(String key, Map<String, dynamic> newMap) {
+          final oldMap = (base[key] is Map)
+              ? Map<String, dynamic>.from(base[key] as Map)
+              : <String, dynamic>{};
+          base[key] = <String, dynamic>{...oldMap, ...newMap};
+        }
+
+        base['v'] = dataJson['v'];
+        mergeSection(
+            'dates', Map<String, dynamic>.from(dataJson['dates'] as Map));
+        mergeSection(
+            'route', Map<String, dynamic>.from(dataJson['route'] as Map));
+        mergeSection(
+            'aircraft', Map<String, dynamic>.from(dataJson['aircraft'] as Map));
+        base['crew'] = dataJson['crew'];
+        mergeSection(
+            'time', Map<String, dynamic>.from(dataJson['time'] as Map));
+        mergeSection('conditions',
+            Map<String, dynamic>.from(dataJson['conditions'] as Map));
+        mergeSection('typeTimes',
+            Map<String, dynamic>.from(dataJson['typeTimes'] as Map));
+        mergeSection('takeoffsLandings',
+            Map<String, dynamic>.from(dataJson['takeoffsLandings'] as Map));
+        mergeSection('approaches',
+            Map<String, dynamic>.from(dataJson['approaches'] as Map));
+        mergeSection(
+            'remarks', Map<String, dynamic>.from(dataJson['remarks'] as Map));
+
+        finalJson = base;
+      }
 
       final Map<String, Object?> row = <String, Object?>{
         'startDate': startDateMs,
@@ -1119,7 +1373,9 @@ class _NewFlightPageState extends State<NewFlightPage> {
         'aircraftIdentifier': aircraftIdentifier,
         'pic': pic,
         'isSimulator': isSim ? 1 : 0,
-        'dataJson': jsonEncode(dataJson),
+        'blockTimeText': blockTimeText,
+        'dataJson': jsonEncode(finalJson),
+
         // createdAt/updatedAt los pone DBHelper
       };
 
@@ -1134,7 +1390,14 @@ class _NewFlightPageState extends State<NewFlightPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(l.t("flight_saved"))),
       );
-      Navigator.pop(context, true);
+      if (_isEdit) {
+        Navigator.pop(context, true);
+      } else {
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const LogsPageList()),
+          (route) => false,
+        );
+      }
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1336,30 +1599,37 @@ class _NewFlightPageState extends State<NewFlightPage> {
 
   // ================== SECTION 04 LOGIC (CREW) ==================
 
-  // ignore: unused_element
   Future<String?> _pickPilotName() async {
-    final Map<String, Object?>? data = await DBHelper.getPilot();
-    if (!mounted) return null;
-
     final AppLocalizations l = AppLocalizations.of(context);
 
-    if (data == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l.t("pilot_data"))),
-      );
-      return null;
-    }
+    // 1) Si ya hay piloto, devolverlo
+    String? name = await _getPilotDisplayName();
+    if (!mounted) return null;
+    if (name != null) return name;
 
-    final String displayName =
-        (data['displayName'] as String? ?? data['name'] as String? ?? '')
+    // 2) Si no hay, ir a PilotData, luego volver y reintentar
+    await Navigator.of(context).push<bool>(
+      MaterialPageRoute(builder: (_) => const PilotData()),
+    );
+
+    name = await _getPilotDisplayName();
+    if (!mounted) return null;
+
+    if (name != null) return name;
+
+    // sigue vacío
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(l.t("pilot_data"))),
+    );
+    return null;
+  }
+
+  Future<String?> _getPilotDisplayName() async {
+    final Map<String, Object?>? data = await DBHelper.getPilot();
+    final String name =
+        (data?['displayName'] as String? ?? data?['name'] as String? ?? '')
             .trim();
-    if (displayName.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l.t("pilot_data"))),
-      );
-      return null;
-    }
-    return displayName;
+    return name.isEmpty ? null : name;
   }
 
   // ================== SECTION 05 LOGIC (FLIGHT TIME) ==================
@@ -1545,6 +1815,13 @@ class _NewFlightPageState extends State<NewFlightPage> {
         }
       }
     });
+  }
+
+  String _centiToText(int centi) {
+    final int v = centi < 0 ? 0 : centi;
+    final int intPart = v ~/ 100;
+    final int decPart = v % 100;
+    return '$intPart,${decPart.toString().padLeft(2, '0')}';
   }
 
   int _parseCentiText(String text) {
@@ -2292,6 +2569,12 @@ class _NewFlightPageState extends State<NewFlightPage> {
   Widget _buildSection11ApproachesContent() {
     final AppLocalizations l = AppLocalizations.of(context);
 
+    final List<String> approachOptions = <String>[
+      ..._kApproachTypes,
+      if (_approachType != null && !_kApproachTypes.contains(_approachType))
+        _approachType!,
+    ];
+
     final TextStyle valueStyle = AppTextStyles.body.copyWith(
       color: AppColors.teal5,
       fontWeight: FontWeight.w700,
@@ -2360,7 +2643,7 @@ class _NewFlightPageState extends State<NewFlightPage> {
                         overflow: TextOverflow.ellipsis,
                       ),
                       items: <DropdownMenuItem<String>>[
-                        for (final String t in _kApproachTypes)
+                        for (final String t in approachOptions)
                           DropdownMenuItem<String>(
                             value: t,
                             child: Text(
@@ -4138,69 +4421,73 @@ class _NewFlightPageState extends State<NewFlightPage> {
         rightIconPath: "assets/icons/logoback.svg",
         onRightIconTap: _cancel,
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            _buildMainInfoSection(),
-            const SizedBox(height: 2),
+      body: (_isEdit && _loadingExisting)
+          ? const Center(child: CircularProgressIndicator())
+          : SingleChildScrollView(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  _buildMainInfoSection(),
+                  const SizedBox(height: 2),
 
-            _buildFlightTimeSection(),
-            const SizedBox(height: 0),
+                  _buildFlightTimeSection(),
+                  const SizedBox(height: 0),
 
-            _buildSections06to11Section(),
-            const SizedBox(height: 2),
+                  _buildSections06to11Section(),
+                  const SizedBox(height: 2),
 
-            // 12
-            SectionContainer(
-              children: <Widget>[
-                SectionItemTitle(title: l.t("flight_section_12_remarks")),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: Colors.white, width: 1),
-                  ),
-                  child: TextField(
-                    controller: _remarksCtrl,
-                    maxLines: 2,
-                    style: AppTextStyles.body.copyWith(color: Colors.white),
-                    decoration: InputDecoration(
-                      border: InputBorder.none,
-                      hintText: l.t("flight_section_12_remarks_hint"),
-                      hintStyle: AppTextStyles.body.copyWith(
-                        color: Colors.white.withOpacity(0.6),
-                        fontStyle: FontStyle.italic,
-                        fontSize: 14,
+                  // 12
+                  SectionContainer(
+                    children: <Widget>[
+                      SectionItemTitle(title: l.t("flight_section_12_remarks")),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 8),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: Colors.white, width: 1),
+                        ),
+                        child: TextField(
+                          controller: _remarksCtrl,
+                          maxLines: 2,
+                          style:
+                              AppTextStyles.body.copyWith(color: Colors.white),
+                          decoration: InputDecoration(
+                            border: InputBorder.none,
+                            hintText: l.t("flight_section_12_remarks_hint"),
+                            hintStyle: AppTextStyles.body.copyWith(
+                              color: Colors.white.withOpacity(0.6),
+                              fontStyle: FontStyle.italic,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
+                      const SizedBox(height: 12),
+                      _buildRemarkTags(),
+                    ],
                   ),
-                ),
-                const SizedBox(height: 12),
-                _buildRemarkTags(),
-              ],
+
+                  ButtonStyles.pillCancelSave(
+                    cancelLabel: l.t("cancel"),
+                    saveLabel: _saving ? l.t("saving") : l.t("save"),
+                    onCancel: () => Navigator.pop(context, false),
+                    onSave: () async {
+                      if (!_saving) await _saveFlight();
+                    },
+
+                    // ✅ SOLO en editar
+                    deleteLabel: widget.flightId != null ? l.t("delete") : null,
+                    onDelete: widget.flightId != null
+                        ? () async => _deleteFlight()
+                        : null,
+                  ),
+
+                  const SizedBox(height: 12),
+                ],
+              ),
             ),
-
-            ButtonStyles.pillCancelSave(
-              cancelLabel: l.t("cancel"),
-              saveLabel: _saving ? l.t("saving") : l.t("save"),
-              onCancel: () => Navigator.pop(context, false),
-              onSave: () async {
-                if (!_saving) await _saveFlight();
-              },
-
-              // ✅ SOLO en editar
-              deleteLabel: widget.flightId != null ? l.t("delete") : null,
-              onDelete:
-                  widget.flightId != null ? () async => _deleteFlight() : null,
-            ),
-
-            const SizedBox(height: 12),
-          ],
-        ),
-      ),
     );
   }
 

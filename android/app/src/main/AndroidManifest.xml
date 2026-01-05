@@ -8,7 +8,7 @@
     <application
         android:label="fly_logicd_logbook_app"
         
-        android:icon="@mipmap/ic_launcher"
+        android:icon="@mipmap/logoflylogicssplash"
         android:requestLegacyExternalStorage="true">`n        <meta-data android:name="flutterEmbedding" android:value="2" />
 
         <!-- Desactiva Impeller a nivel de app (Flutter v2 embedding) -->

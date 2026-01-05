@@ -30,11 +30,11 @@ class AppTextStyles {
 
   // Cuerpo
   static const TextStyle body = TextStyle(
-    fontSize: 16,
+    fontSize: 14,
   );
 
   static const TextStyle bodySecondary = TextStyle(
-    fontSize: 15,
+    fontSize: 12,
   );
 
   static const TextStyle bodyBold = TextStyle(

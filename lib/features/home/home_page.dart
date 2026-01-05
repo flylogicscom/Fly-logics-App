@@ -35,7 +35,7 @@ class HomePage extends StatelessWidget {
     // Fondo siempre oscuro
     const BoxDecoration bgDecoration = BoxDecoration(
       gradient: LinearGradient(
-        colors: [AppColors.blackDeep, AppColors.black],
+        colors: [AppColors.blackDeep, Color(0xFF001B28)],
         begin: Alignment.topLeft,
         end: Alignment.bottomRight,
       ),
@@ -386,7 +386,7 @@ class CustomBottomBar extends StatelessWidget {
 
     return Container(
       height: 75,
-      decoration: const BoxDecoration(color: AppColors.black),
+      decoration: const BoxDecoration(color: Colors.black),
       child: Stack(
         children: [
           const Positioned.fill(

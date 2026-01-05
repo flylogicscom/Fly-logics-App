@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:fly_logicd_logbook_app/common/base_scaffold.dart';
 import 'package:fly_logicd_logbook_app/common/custom_app_bar.dart';
 import 'package:fly_logicd_logbook_app/common/app_text_styles.dart';
+import 'package:fly_logicd_logbook_app/common/app_colors.dart';
 import 'package:fly_logicd_logbook_app/common/button_styles.dart';
 import 'package:fly_logicd_logbook_app/l10n/app_localizations.dart';
 import 'package:fly_logicd_logbook_app/utils/db_helper.dart';
@@ -23,7 +24,11 @@ class LogsPage extends StatefulWidget {
 }
 
 class _LogsPageState extends State<LogsPage> {
-  int get _mainLogFlightsCount => 0;
+  int _mainLogFlightsCount = 0;
+
+  bool _mainLogLocked = true;
+
+  static const String _mainLogStateTable = 'mainlog_state';
 
   String? _totalsName;
   bool _totalsLocked = false;
@@ -32,6 +37,48 @@ class _LogsPageState extends State<LogsPage> {
   void initState() {
     super.initState();
     _loadTotalsMeta();
+    _loadMainLogMeta();
+  }
+
+  Future<void> _loadMainLogMeta() async {
+    // 1) lee candado desde la MISMA tabla/columna que usa logs_pagelist en _saveFlightsLockState
+    final db = await DBHelper.getDB();
+
+    // Si ya tienes _mainLogStateTable definido, úsalo aquí para que NO quede “unused”
+    await db.execute('''
+    CREATE TABLE IF NOT EXISTS $_mainLogStateTable (
+      id INTEGER PRIMARY KEY,
+      isLocked INTEGER
+    )
+  ''');
+
+    bool locked = false;
+    final stateRows = await db.query(
+      _mainLogStateTable,
+      where: 'id = ?',
+      whereArgs: const [1],
+      limit: 1,
+    );
+    if (stateRows.isNotEmpty) {
+      final v = stateRows.first['isLocked'];
+      if (v is int) locked = v != 0;
+      if (v is num) locked = v.toInt() != 0;
+    }
+
+    // 2) conteo de vuelos (usa el mismo loader que LogsPageList)
+    int count = 0;
+    try {
+      final flights = await DBHelper.getFlightsForLogsList();
+      count = flights.length;
+    } catch (_) {
+      count = 0;
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _mainLogLocked = locked;
+      _mainLogFlightsCount = count;
+    });
   }
 
   // Carga nombre y estado de candado desde previous_totals
@@ -89,10 +136,24 @@ class _LogsPageState extends State<LogsPage> {
   }
 
   // Navega a la lista de bitácoras
-  void _openLogbooksList(BuildContext context) {
-    Navigator.of(context).push(
+  Future<void> _openLogbooksList(BuildContext context) async {
+    final result = await Navigator.of(context).push<Map<String, Object?>>(
       MaterialPageRoute(builder: (_) => const LogsPageList()),
     );
+
+    if (!mounted) return;
+
+    if (result != null) {
+      final lockedVal = result['locked'];
+      final countVal = result['count'];
+      setState(() {
+        if (lockedVal is bool) _mainLogLocked = lockedVal;
+        if (countVal is int) _mainLogFlightsCount = countVal;
+        if (countVal is num) _mainLogFlightsCount = countVal.toInt();
+      });
+    }
+
+    await _loadMainLogMeta();
   }
 
   @override
@@ -107,6 +168,11 @@ class _LogsPageState extends State<LogsPage> {
       totalsLabel = t.t("logs_totals_title_01");
     }
 
+    // ignore: no_leading_underscores_for_local_identifiers
+    final int _countDisplay =
+        _mainLogFlightsCount > 999 ? 999 : _mainLogFlightsCount;
+    // ignore: no_leading_underscores_for_local_identifiers
+    final String _countText = _countDisplay.toString().padLeft(3, '0');
     return BaseScaffold(
       appBar: CustomAppBar(
         title: t.t("logs"),
@@ -153,10 +219,17 @@ class _LogsPageState extends State<LogsPage> {
             // ====== BLOQUE 2: BITÁCORA PRINCIPAL ======
             ButtonStyles.infoButtonOne(
               context: context,
-              label: '${t.t("logs_mainlog_title_01")} ($_mainLogFlightsCount)',
+              label: t.t("logs_mainlog_title"),
               onTap: () => _openLogbooksList(context),
               leftIconAsset: 'assets/icons/logbooks.svg',
-              locked: false,
+              locked: _mainLogLocked,
+              rightIconWidget1: Text(
+                _countText,
+                style: AppTextStyles.body.copyWith(
+                  color: AppColors.teal2,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
             ),
             const SizedBox(height: 20),
 

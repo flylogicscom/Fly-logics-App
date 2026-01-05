@@ -1,11 +1,13 @@
 // lib/features/logs/logs_pagelist.dart
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import 'package:fly_logicd_logbook_app/common/app_colors.dart';
 import 'package:fly_logicd_logbook_app/common/base_scaffold.dart';
 import 'package:fly_logicd_logbook_app/common/custom_app_bar.dart';
+import 'package:fly_logicd_logbook_app/common/button_styles.dart';
 import 'package:fly_logicd_logbook_app/l10n/app_localizations.dart';
 import 'package:fly_logicd_logbook_app/utils/db_helper.dart';
 
@@ -97,6 +99,18 @@ class _LogsPageListState extends State<LogsPageList> {
   bool _loading = false;
   List<LogbookFlight> _all = <LogbookFlight>[];
 
+  bool _flightsLocked = true;
+
+  static const String _mainLogStateTable = 'mainlog_state';
+  static const String _mainLogSortTable = 'mainlog_day_sort';
+
+  Map<int, int> _sortIndexById = <int, int>{};
+
+  // === NUEVO (solo para mejorar drag preview) ===
+  Map<int, int>? _sortIndexSnapshot;
+  int? _lastPreviewDraggedId;
+  int? _lastPreviewTargetId;
+
   // Filtros
   int? _filterYear;
   int? _filterMonth; // 1..12
@@ -107,7 +121,522 @@ class _LogsPageListState extends State<LogsPageList> {
   @override
   void initState() {
     super.initState();
+    _loadFlightsLockState();
+    _loadBaselineTotalsFlightTime(); // <-- AÑADIR
     _reload();
+  }
+
+  int? _asIntId(Object? rawId) {
+    if (rawId == null) return null;
+    if (rawId is int) return rawId;
+    if (rawId is num) return rawId.toInt();
+    return int.tryParse(rawId.toString());
+  }
+
+  String _flightKey(LogbookFlight f) {
+    final intId = _asIntId(f.id);
+    if (intId != null) return 'id:$intId';
+
+    final s = f.id?.toString();
+    if (s != null && s.trim().isNotEmpty) return 'sid:${s.trim()}';
+
+    return 'ts:${f.startDate.millisecondsSinceEpoch}_${f.createdAt.millisecondsSinceEpoch}';
+  }
+
+  bool _isSameDay(DateTime a, DateTime b) {
+    return a.year == b.year && a.month == b.month && a.day == b.day;
+  }
+
+  Future<void> _ensureMainLogStateTable() async {
+    final db = await DBHelper.getDB();
+    await db.execute('''
+    CREATE TABLE IF NOT EXISTS $_mainLogStateTable (
+      id INTEGER PRIMARY KEY,
+      isLocked INTEGER
+    )
+  ''');
+  }
+
+  Future<void> _loadFlightsLockState() async {
+    bool locked = _flightsLocked;
+    try {
+      final db = await DBHelper.getDB();
+      await _ensureMainLogStateTable();
+      final rows = await db.query(
+        _mainLogStateTable,
+        where: 'id = ?',
+        whereArgs: const [1],
+        limit: 1,
+      );
+      if (rows.isNotEmpty) {
+        final v = rows.first['isLocked'];
+        if (v is int) locked = v != 0;
+        if (v is num) locked = v.toInt() != 0;
+      }
+    } catch (_) {
+      // no-op
+    }
+
+    if (!mounted) return;
+    setState(() => _flightsLocked = locked);
+  }
+
+  Future<void> _saveFlightsLockState() async {
+    try {
+      final db = await DBHelper.getDB();
+      await _ensureMainLogStateTable();
+      await db.rawInsert(
+        'INSERT OR REPLACE INTO $_mainLogStateTable (id, isLocked) VALUES (1, ?)',
+        [_flightsLocked ? 1 : 0],
+      );
+    } catch (_) {
+      // no-op
+    }
+  }
+
+  Future<void> _ensureSortTable() async {
+    final db = await DBHelper.getDB();
+    await db.execute('''
+    CREATE TABLE IF NOT EXISTS $_mainLogSortTable (
+      flightId INTEGER PRIMARY KEY,
+      sortIndex INTEGER
+    )
+  ''');
+  }
+
+  Future<Map<int, int>> _loadSortIndexes(List<LogbookFlight> flights) async {
+    final ids = <int>[];
+    for (final f in flights) {
+      final id = _asIntId(f.id);
+      if (id != null) ids.add(id);
+    }
+    if (ids.isEmpty) return <int, int>{};
+
+    try {
+      final db = await DBHelper.getDB();
+      await _ensureSortTable();
+
+      final placeholders = List.filled(ids.length, '?').join(',');
+      final rows = await db.rawQuery(
+        'SELECT flightId, sortIndex FROM $_mainLogSortTable WHERE flightId IN ($placeholders)',
+        ids,
+      );
+
+      final map = <int, int>{};
+      for (final r in rows) {
+        final fid = r['flightId'];
+        final idx = r['sortIndex'];
+        if (fid is int && idx is int) map[fid] = idx;
+        if (fid is num && idx is num) map[fid.toInt()] = idx.toInt();
+      }
+      return map;
+    } catch (_) {
+      return <int, int>{};
+    }
+  }
+
+  Future<void> _saveDaySortOrder(
+      DateTime day, List<LogbookFlight> ordered) async {
+    try {
+      final db = await DBHelper.getDB();
+      await _ensureSortTable();
+
+      await db.transaction((txn) async {
+        for (int i = 0; i < ordered.length; i++) {
+          final id = _asIntId(ordered[i].id);
+          if (id == null) continue;
+          await txn.rawInsert(
+            'INSERT OR REPLACE INTO $_mainLogSortTable (flightId, sortIndex) VALUES (?, ?)',
+            [id, i],
+          );
+        }
+      });
+    } catch (_) {
+      // no-op
+    }
+  }
+
+  Map<String, Object?> _buildPopResult() {
+    return <String, Object?>{
+      'locked': _flightsLocked,
+      'count': _all.length,
+    };
+  }
+
+  // === CAMBIO: pop robusto (devuelve resultado y evita bloqueos por navigator anidado) ===
+  Future<bool> _popWithResult() async {
+    final result = _buildPopResult();
+
+    final nav = Navigator.of(context);
+    if (nav.canPop()) {
+      nav.pop(result);
+      return true;
+    }
+
+    final root = Navigator.of(context, rootNavigator: true);
+    if (root.canPop()) {
+      root.pop(result);
+      return true;
+    }
+
+    return false;
+  }
+
+  Future<void> _openNewFlight() async {
+    if (_flightsLocked) return;
+
+    final bool? changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (_) => NewFlightPage()),
+    );
+
+    if (changed == true) {
+      await _reload();
+    }
+  }
+
+  Future<void> _reorderWithinSameDay(
+      LogbookFlight dragged, LogbookFlight target) async {
+    if (_flightsLocked) return;
+    // si tú ya agregaste _isFilterActive, deja esta línea:
+    // if (_isFilterActive) return;
+
+    if (!_isSameDay(dragged.startDate, target.startDate)) return;
+
+    final draggedKey = _flightKey(dragged);
+    final targetKey = _flightKey(target);
+    if (draggedKey == targetKey) return;
+
+    final day = dragged.startDate;
+
+    // lista del día en el orden actual visible
+    final dayFlights = _all.where((f) => _isSameDay(f.startDate, day)).toList();
+    final from = dayFlights.indexWhere((f) => _flightKey(f) == draggedKey);
+    final to = dayFlights.indexWhere((f) => _flightKey(f) == targetKey);
+    if (from < 0 || to < 0 || from == to) return;
+
+    final moved = dayFlights.removeAt(from);
+    dayFlights.insert(to, moved);
+
+    // actualiza sortIndex en memoria (para que SE VEA el cambio)
+    final newSort = Map<int, int>.from(_sortIndexById);
+    for (int i = 0; i < dayFlights.length; i++) {
+      final id = _asIntId(dayFlights[i].id);
+      if (id != null) newSort[id] = i;
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _sortIndexById = newSort;
+      _all = _computeOrdering(_all);
+    });
+
+    // persiste (sin reload)
+    await _saveDaySortOrder(day, dayFlights);
+
+    // limpia estado de preview si lo estás usando
+    _sortIndexSnapshot = null;
+    _lastPreviewDraggedId = null;
+    _lastPreviewTargetId = null;
+  }
+
+  // === SUBTOTALES (cada 10 vuelos) ===
+  double _baselineTotalsFlightTime =
+      0.0; // viene de TotalsPage (tabla previous_totals)
+
+  Future<void> _loadBaselineTotalsFlightTime() async {
+    try {
+      final db = await DBHelper.getDB();
+      // TotalsPage usa: table = 'previous_totals', col = 'totalFlightTime'
+      final rows = await db.query('previous_totals',
+          columns: ['totalFlightTime'], limit: 1);
+      final v = rows.isEmpty ? null : rows.first['totalFlightTime'];
+      _baselineTotalsFlightTime = _parseDecimalLikeTotals(v);
+    } catch (_) {
+      _baselineTotalsFlightTime = 0.0;
+    }
+    if (!mounted) return;
+    setState(() {});
+  }
+
+  bool _isFilterActive = false;
+
+  bool _hasAnyFilter() {
+    return (_filterYear != null) ||
+        (_filterMonth != null) ||
+        _filterRegCtrl.text.trim().isNotEmpty ||
+        _filterIdCtrl.text.trim().isNotEmpty ||
+        _filterPicCtrl.text.trim().isNotEmpty;
+  }
+
+  double _parseDecimalLikeTotals(Object? value) {
+    if (value == null) return 0.0;
+    if (value is num) return value.toDouble();
+    final t = value.toString().trim();
+    if (t.isEmpty) return 0.0;
+    // igual lógica que TotalsPage: quita miles '.' y usa ',' como decimal
+    final s = t.replaceAll('.', '').replaceAll(',', '.');
+    return double.tryParse(s) ?? 0.0;
+  }
+
+  double _parseBlockTimeToHours(String text) {
+    final t = text.trim();
+    if (t.isEmpty) return 0.0;
+
+    // Soporta HH:MM
+    if (t.contains(':')) {
+      final parts = t.split(':');
+      if (parts.length == 2) {
+        final hh = int.tryParse(parts[0].trim()) ?? 0;
+        final mm = int.tryParse(parts[1].trim()) ?? 0;
+        return hh + (mm / 60.0);
+      }
+    }
+
+    // Soporta formato decimal tipo "5,00"
+    return _parseDecimalLikeTotals(t);
+  }
+
+  String _formatDecimalLikeTotals(double value) {
+    final String s = value.toStringAsFixed(2);
+    final parts = s.split('.');
+    String intPart = parts[0];
+    final decPart = parts[1];
+
+    final buffer = StringBuffer();
+    int count = 0;
+    for (int i = intPart.length - 1; i >= 0; i--) {
+      buffer.write(intPart[i]);
+      count++;
+      if (count == 3 && i != 0) {
+        buffer.write('.');
+        count = 0;
+      }
+    }
+    final withDots = buffer.toString().split('').reversed.join();
+    return '$withDots,$decPart';
+  }
+
+  void _openSubtotalsPopup(int pageIndex) {
+    // Todo: definir más tarde (por ahora no hace nada)
+  }
+
+  Widget _buildSubtotalsSeparator({
+    required AppLocalizations l,
+    required int pageIndex,
+    required double pageTime,
+    required double totalsTime,
+  }) {
+    final pageStr = pageIndex.toString().padLeft(2, '0');
+
+    final lineColor = AppColors.teal4.withOpacity(0.65);
+    final vLineColor = AppColors.teal4.withOpacity(0.50);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: GestureDetector(
+        onTap: () => _openSubtotalsPopup(pageIndex),
+        behavior: HitTestBehavior.opaque,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Expanded(child: Container(height: 1, color: lineColor)),
+            const SizedBox(width: 10),
+            IntrinsicWidth(
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [AppColors.teal1, AppColors.teal2],
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                  ),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: lineColor, width: 1),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '${l.t("page")} ',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 12,
+                      ),
+                    ),
+                    Text(
+                      pageStr,
+                      style: TextStyle(
+                        color: AppColors.teal4,
+                        fontWeight: FontWeight.w900,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(width: 5),
+                    Container(width: 0.5, height: 18, color: vLineColor),
+                    const SizedBox(width: 5),
+                    Text(
+                      '${l.t("time")} ',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w900,
+                        fontSize: 12,
+                      ),
+                    ),
+                    Text(
+                      _formatDecimalLikeTotals(pageTime),
+                      style: const TextStyle(
+                        color: AppColors.teal4,
+                        fontWeight: FontWeight.w900,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(width: 5),
+                    Container(width: 0.5, height: 18, color: vLineColor),
+                    const SizedBox(width: 5),
+                    Text(
+                      '${l.t("totals")} ',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w900,
+                        fontSize: 12,
+                      ),
+                    ),
+                    Text(
+                      _formatDecimalLikeTotals(totalsTime),
+                      style: const TextStyle(
+                        color: AppColors.teal4,
+                        fontWeight: FontWeight.w900,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: Container(height: 1, color: lineColor)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // === NUEVO: preview en vivo mientras se arrastra (para que se mueva el que se desplaza) ===
+  void _previewReorderWithinSameDay(
+      LogbookFlight dragged, LogbookFlight target) {
+    if (_flightsLocked) return;
+    if (!_isSameDay(dragged.startDate, target.startDate)) return;
+
+    final draggedId = _asIntId(dragged.id);
+    final targetId = _asIntId(target.id);
+    if (draggedId == null || targetId == null) return;
+    if (draggedId == targetId) return;
+
+    if (_lastPreviewDraggedId == draggedId &&
+        _lastPreviewTargetId == targetId) {
+      return;
+    }
+    _lastPreviewDraggedId = draggedId;
+    _lastPreviewTargetId = targetId;
+
+    final day = dragged.startDate;
+
+    final dayFlights = _all.where((f) => _isSameDay(f.startDate, day)).toList();
+    final from = dayFlights.indexWhere((f) => _asIntId(f.id) == draggedId);
+    final to = dayFlights.indexWhere((f) => _asIntId(f.id) == targetId);
+    if (from < 0 || to < 0 || from == to) return;
+
+    final moved = dayFlights.removeAt(from);
+    dayFlights.insert(to, moved);
+
+    final newSort = Map<int, int>.from(_sortIndexById);
+    for (int i = 0; i < dayFlights.length; i++) {
+      final id = _asIntId(dayFlights[i].id);
+      if (id != null) newSort[id] = i;
+    }
+
+    setState(() {
+      _sortIndexById = newSort;
+      _all = _computeOrdering(_all);
+    });
+  }
+
+  // === NUEVO: restaurar si se cancela el drag ===
+  void _restorePreviewIfNeeded() {
+    final snap = _sortIndexSnapshot;
+    if (snap == null) return;
+
+    setState(() {
+      _sortIndexById = snap;
+      _all = _computeOrdering(_all);
+    });
+
+    _sortIndexSnapshot = null;
+    _lastPreviewDraggedId = null;
+    _lastPreviewTargetId = null;
+  }
+
+  Widget _wrapReorderableItem(
+      BuildContext context, LogbookFlight flight, Widget child) {
+    if (_flightsLocked || _isFilterActive) return child;
+
+    String flightKey(LogbookFlight f) {
+      final intId = _asIntId(f.id);
+      if (intId != null) return 'id:$intId';
+
+      final s = f.id?.toString();
+      if (s != null && s.trim().isNotEmpty) return 'sid:${s.trim()}';
+
+      // fallback estable si id no existe
+      return 'ts:${f.startDate.millisecondsSinceEpoch}_${f.createdAt.millisecondsSinceEpoch}';
+    }
+
+    return DragTarget<LogbookFlight>(
+      onWillAccept: (dragged) {
+        if (dragged == null) return false;
+        if (_flightsLocked) return false;
+        return _isSameDay(dragged.startDate, flight.startDate) &&
+            flightKey(dragged) != flightKey(flight);
+      },
+
+      // === NUEVO: preview mientras se mueve ===
+      onMove: (details) => _previewReorderWithinSameDay(details.data, flight),
+      onAccept: (dragged) => _reorderWithinSameDay(dragged, flight),
+      builder: (context, candidateData, rejectedData) {
+        return LongPressDraggable<LogbookFlight>(
+          data: flight,
+          // === NUEVO: snapshot para revertir si se cancela ===
+          onDragStarted: () {
+            _sortIndexSnapshot = Map<int, int>.from(_sortIndexById);
+            _lastPreviewDraggedId = null;
+            _lastPreviewTargetId = null;
+          },
+          onDragCompleted: () {
+            _sortIndexSnapshot = null;
+            _lastPreviewDraggedId = null;
+            _lastPreviewTargetId = null;
+          },
+          onDraggableCanceled: (_, __) {
+            _restorePreviewIfNeeded();
+          },
+          feedback: Material(
+            color: Colors.transparent,
+            child: ConstrainedBox(
+              constraints: BoxConstraints.tightFor(
+                width: MediaQuery.of(context).size.width - 10,
+              ),
+              child: child,
+            ),
+          ),
+          // === CAMBIO: no dejar “hueco invisible” durante drag (mejora percepción de desplazamiento) ===
+          childWhenDragging: Opacity(opacity: 0.0, child: child),
+          child: child,
+        );
+      },
+    );
   }
 
   @override
@@ -172,8 +701,10 @@ class _LogsPageListState extends State<LogsPageList> {
 
     try {
       final loaded = await (widget.loader ?? _defaultLoader).call();
+      final sortMap = await _loadSortIndexes(loaded);
       if (!mounted) return;
       setState(() {
+        _sortIndexById = sortMap;
         _all = _computeOrdering(loaded);
       });
     } finally {
@@ -188,8 +719,27 @@ class _LogsPageListState extends State<LogsPageList> {
     final copy = List<LogbookFlight>.from(flights);
 
     copy.sort((a, b) {
-      final d = a.startDate.compareTo(b.startDate);
+      final aDay =
+          DateTime(a.startDate.year, a.startDate.month, a.startDate.day);
+      final bDay =
+          DateTime(b.startDate.year, b.startDate.month, b.startDate.day);
+      final d = aDay.compareTo(bDay);
       if (d != 0) return d;
+
+      if (_isSameDay(a.startDate, b.startDate)) {
+        final aId = _asIntId(a.id);
+        final bId = _asIntId(b.id);
+        final aIdx = aId == null ? null : _sortIndexById[aId];
+        final bIdx = bId == null ? null : _sortIndexById[bId];
+
+        if (aIdx != null || bIdx != null) {
+          if (aIdx == null) return 1;
+          if (bIdx == null) return -1;
+          final c = aIdx.compareTo(bIdx);
+          if (c != 0) return c;
+        }
+      }
+
       return a.createdAt.compareTo(b.createdAt);
     });
 
@@ -255,9 +805,114 @@ class _LogsPageListState extends State<LogsPageList> {
     return flights.where((f) => matchesText(f) && matchesFilters(f)).toList();
   }
 
+  Future<String?> _pickPilotFromUsedFlights(
+      BuildContext context, List<String> pilots) async {
+    final l = AppLocalizations.of(context);
+
+    if (pilots.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(l.t("no_results"))),
+        );
+      }
+      return null;
+    }
+
+    final TextEditingController searchCtrl = TextEditingController();
+    final String? picked = await showDialog<String>(
+      context: context,
+      builder: (dctx) {
+        return StatefulBuilder(
+          builder: (dctx, setD) {
+            final String q = searchCtrl.text.trim().toLowerCase();
+            final List<String> filtered = q.isEmpty
+                ? pilots
+                : pilots.where((p) => p.toLowerCase().contains(q)).toList();
+
+            return AlertDialog(
+              backgroundColor: AppColors.teal2,
+              title: Text(
+                l.t("crew_role_pic_name"),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              content: SizedBox(
+                width: double.maxFinite,
+                height: 420,
+                child: Column(
+                  children: [
+                    TextField(
+                      controller: searchCtrl,
+                      onChanged: (_) => setD(() {}),
+                      decoration: InputDecoration(
+                        hintText: l.t("search"),
+                        prefixIcon: const Icon(Icons.search),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Expanded(
+                      child: filtered.isEmpty
+                          ? Center(
+                              child: Text(
+                                l.t("no_results"),
+                                style: const TextStyle(color: Colors.white),
+                              ),
+                            )
+                          : ListView.builder(
+                              itemCount: filtered.length,
+                              itemBuilder: (_, i) {
+                                final String name = filtered[i];
+                                return ListTile(
+                                  title: Text(
+                                    name,
+                                    style: const TextStyle(color: Colors.white),
+                                  ),
+                                  onTap: () => Navigator.of(dctx).pop(name),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dctx).pop(''),
+                  child: Text(
+                    l.t("clear"),
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(dctx).pop(null),
+                  child: const Text(
+                    "Cerrar",
+                    style: TextStyle(color: Colors.white),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    searchCtrl.dispose();
+    return picked;
+  }
+
   Future<void> _openFilters() async {
     final years = _all.map((e) => e.year).toSet().toList()..sort();
     final l = AppLocalizations.of(context);
+
+    final List<String> pilotOptions = _all
+        .map((e) => e.pic.trim())
+        .where((s) => s.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
 
     int? tempYear = _filterYear;
     int? tempMonth = _filterMonth;
@@ -385,24 +1040,61 @@ class _LogsPageListState extends State<LogsPageList> {
                       TextField(
                         controller: tempReg,
                         decoration: InputDecoration(
-                          labelText: l.t("aircraft_registration"),
+                          labelText: l.t("aircraft_registration_label"),
                           labelStyle: const TextStyle(color: Colors.white),
                         ),
+                        textCapitalization: TextCapitalization.characters,
+                        inputFormatters: [
+                          TextInputFormatter.withFunction((oldValue, newValue) {
+                            final upper = newValue.text.toUpperCase();
+                            return newValue.text == upper
+                                ? newValue
+                                : newValue.copyWith(
+                                    text: upper, selection: newValue.selection);
+                          }),
+                        ],
                       ),
                       const SizedBox(height: 10),
                       TextField(
                         controller: tempId,
                         decoration: InputDecoration(
-                          labelText: l.t("aircraft_identifier"),
+                          labelText: l.t("aircraft_identifier_label"),
                           labelStyle: const TextStyle(color: Colors.white),
                         ),
+                        textCapitalization: TextCapitalization.characters,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.allow(
+                              RegExp(r'[A-Za-z0-9]')),
+                          TextInputFormatter.withFunction((oldValue, newValue) {
+                            final upper = newValue.text.toUpperCase();
+                            return newValue.text == upper
+                                ? newValue
+                                : newValue.copyWith(
+                                    text: upper, selection: newValue.selection);
+                          }),
+                        ],
                       ),
                       const SizedBox(height: 10),
-                      TextField(
-                        controller: tempPic,
-                        decoration: InputDecoration(
-                          labelText: l.t("pilot_in_command"),
-                          labelStyle: const TextStyle(color: Colors.white),
+                      InkWell(
+                        onTap: () async {
+                          if (_flightsLocked) return;
+                          final String? picked =
+                              await _pickPilotFromUsedFlights(
+                                  ctx, pilotOptions);
+                          if (picked == null) return;
+                          setSB(() => tempPic.text = picked);
+                        },
+                        child: IgnorePointer(
+                          child: TextField(
+                            controller: tempPic,
+                            readOnly: true,
+                            decoration: InputDecoration(
+                              labelText: l.t("crew_role_pic_name"),
+                              labelStyle: const TextStyle(color: Colors.white),
+                              suffixIcon:
+                                  const Icon(Icons.search, color: Colors.white),
+                            ),
+                          ),
                         ),
                       ),
                       const SizedBox(height: 16),
@@ -417,6 +1109,7 @@ class _LogsPageListState extends State<LogsPageList> {
                                   _filterRegCtrl.text = tempReg.text;
                                   _filterIdCtrl.text = tempId.text;
                                   _filterPicCtrl.text = tempPic.text;
+                                  _isFilterActive = _hasAnyFilter();
                                 });
                                 Navigator.pop(ctx);
                               },
@@ -435,9 +1128,11 @@ class _LogsPageListState extends State<LogsPageList> {
       },
     );
 
-    tempReg.dispose();
-    tempId.dispose();
-    tempPic.dispose();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      tempReg.dispose();
+      tempId.dispose();
+      tempPic.dispose();
+    });
   }
 
   Map<int, List<LogbookFlight>> _groupByYear(List<LogbookFlight> flights) {
@@ -455,186 +1150,314 @@ class _LogsPageListState extends State<LogsPageList> {
 
     final filtered = _applyFilters(_all);
     final grouped = _groupByYear(filtered);
+    final visible = filtered;
 
-    return BaseScaffold(
-      appBar: CustomAppBar(
-        title: l.t("logs"),
-        rightIconPath: 'assets/icons/logoback.svg',
-        onRightIconTap: () {
-          if (Navigator.canPop(context)) Navigator.pop(context);
-        },
-      ),
-      body: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-            child: Row(
-              children: [
-                InkWell(
-                  onTap: _openFilters,
-                  borderRadius: BorderRadius.circular(12),
-                  child: Container(
-                    width: 46,
-                    height: 46,
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [AppColors.teal1, AppColors.teal2],
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                      ),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    alignment: Alignment.center,
-                    child: const Icon(Icons.filter_alt_outlined,
-                        color: Colors.white),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: TextField(
-                    controller: _searchCtrl,
-                    decoration: InputDecoration(
-                      labelText: l.t("search"),
-                      // ✅ el "título" pasa a ser "subtítulo" al enfocar/escribir (label flotante)
-                      floatingLabelBehavior: FloatingLabelBehavior.auto,
+// clave estable para mapear posición visible (id si existe; fallback si no)
+    int flightKey(LogbookFlight f) =>
+        _asIntId(f.id) ??
+        (f.startDate.millisecondsSinceEpoch ^
+            f.createdAt.millisecondsSinceEpoch);
 
-                      prefixIcon: const Icon(Icons.search),
+// índice visible por vuelo
+    final indexByKey = <int, int>{};
+    final times = <double>[];
+    for (int i = 0; i < visible.length; i++) {
+      indexByKey[flightKey(visible[i])] = i;
+      times.add(_parseBlockTimeToHours(visible[i].blockTime));
+    }
 
-                      // ✅ borde 1px tipo "cuadro de texto"
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide(
-                          width: 1,
-                          color: AppColors.teal4.withOpacity(0.70),
-                        ),
-                      ),
-                      enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide(
-                          width: 1,
-                          color: AppColors.teal4.withOpacity(0.70),
-                        ),
-                      ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide(
-                          width: 1,
-                          color: AppColors.teal4,
-                        ),
-                      ),
+// prefix sum: prefix[i] = suma de 0..i-1
+    final prefix = List<double>.filled(times.length + 1, 0.0);
+    for (int i = 0; i < times.length; i++) {
+      prefix[i + 1] = prefix[i] + times[i];
+    }
 
-                      isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 12,
-                      ),
-                    ),
-                    onChanged: (_) => setState(() {}),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: _loading
-                ? const Center(child: CircularProgressIndicator())
-                : filtered.isEmpty
-                    ? Center(child: Text(l.t("no_results")))
-                    : Scrollbar(
-                        thumbVisibility: true,
-                        interactive: true,
-                        child: RefreshIndicator(
-                          onRefresh: _reload,
-                          child: CustomScrollView(
-                            slivers: [
-                              for (final entry in grouped.entries) ...[
-                                SliverPersistentHeader(
-                                  pinned: true,
-                                  delegate: _YearHeaderDelegate(
-                                    yearText: entry.key.toString(),
-                                  ),
-                                ),
-                                SliverList(
-                                  delegate: SliverChildBuilderDelegate(
-                                    (ctx, i) {
-                                      final f = entry.value[i];
+    return WillPopScope(
+      onWillPop: () async {
+        final popped = await _popWithResult();
+        return !popped; // si no pudo hacer pop, deja que el sistema lo intente
+      },
+      child: BaseScaffold(
+        appBar: CustomAppBar(
+          title: l.t("logs"),
+          rightIconPath: 'assets/icons/logoback.svg',
+          // === CAMBIO: usar pop con resultado (y fallback) ===
+          onRightIconTap: () {
+            _popWithResult();
+          },
+        ),
+        body: Stack(children: [
+          Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _searchCtrl,
+                        decoration: InputDecoration(
+                          labelText: l.t("search"),
+                          // ✅ el "título" pasa a ser "subtítulo" al enfocar/escribir (label flotante)
+                          floatingLabelBehavior: FloatingLabelBehavior.auto,
 
-                                      return Padding(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 12,
-                                          vertical: 6,
-                                        ),
-                                        child: LogbookInfoButton(
-                                          orderNumber: f.orderNumber,
-                                          dateTitle: l.t("date"),
-                                          dateText: f.dayMonthText,
-                                          blockTitle: l.t("time"),
-                                          blockTimeText: f.blockTime,
-                                          fromTitle: l.t("flight_from"),
-                                          fromFlagEmoji: f.fromFlagEmoji,
-                                          fromIcao: f.fromIcao,
-                                          aircraftTitle: l.t("airplane"),
-                                          aircraftRegistration:
-                                              f.aircraftRegistration,
+                          prefixIcon: const Icon(Icons.search),
 
-                                          // Ajustes opcionales (si quieres activarlos aquí):
-                                          titleFontSize: 10,
-                                          valueFontSize: 12,
-                                          bigValueFontSize: 15,
-                                          orderFontSize: 15,
-                                          flagFontSize: 10,
-                                          aircraftFontSize: 12,
+                          // ✅ borde 1px tipo "cuadro de texto"
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(
+                              width: 1,
+                              color: AppColors.teal4.withOpacity(0.70),
+                            ),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(
+                              width: 1,
+                              color: AppColors.teal4.withOpacity(0.70),
+                            ),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide(
+                              width: 1,
+                              color: AppColors.teal4,
+                            ),
+                          ),
 
-                                          onTap: () async {
-                                            final Object? rawId = f.id;
-
-                                            final int? flightId = rawId is int
-                                                ? rawId
-                                                : (rawId is num
-                                                    ? rawId.toInt()
-                                                    : int.tryParse(
-                                                        rawId?.toString() ??
-                                                            ''));
-
-                                            if (flightId == null) {
-                                              ScaffoldMessenger.of(context)
-                                                  .showSnackBar(
-                                                SnackBar(
-                                                  content: Text(
-                                                      '${l.t("error")}: id inválido'),
-                                                ),
-                                              );
-                                              return;
-                                            }
-
-                                            final bool? changed =
-                                                await Navigator.push<bool>(
-                                              context,
-                                              MaterialPageRoute(
-                                                builder: (_) => NewFlightPage(
-                                                    flightId: flightId),
-                                              ),
-                                            );
-
-                                            if (changed == true) {
-                                              await _reload();
-                                            }
-                                          },
-                                        ),
-                                      );
-                                    },
-                                    childCount: entry.value.length,
-                                  ),
-                                ),
-                                const SliverToBoxAdapter(
-                                    child: SizedBox(height: 8)),
-                              ],
-                            ],
+                          isDense: true,
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 12,
                           ),
                         ),
+                        onChanged: (_) => setState(() {}),
                       ),
+                    ),
+                    const SizedBox(width: 10),
+                    InkWell(
+                      onTap: _openFilters,
+                      borderRadius: BorderRadius.circular(12),
+                      child: Container(
+                        width: 46,
+                        height: 46,
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [AppColors.teal1, AppColors.teal2],
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                          ),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        alignment: Alignment.center,
+                        child: const Icon(Icons.filter_alt_outlined,
+                            color: Colors.white),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    InkWell(
+                      onTap: () async {
+                        setState(() => _flightsLocked = !_flightsLocked);
+                        await _saveFlightsLockState();
+                      },
+                      borderRadius: BorderRadius.circular(12),
+                      child: Container(
+                        width: 46,
+                        height: 46,
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [AppColors.teal1, AppColors.teal2],
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                          ),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        alignment: Alignment.center,
+                        child: Icon(
+                          _flightsLocked ? Icons.lock : Icons.lock_open,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: _loading
+                    ? const Center(child: CircularProgressIndicator())
+                    : filtered.isEmpty
+                        ? Center(child: Text(l.t("no_results")))
+                        : Scrollbar(
+                            thumbVisibility: true,
+                            interactive: true,
+                            child: RefreshIndicator(
+                              onRefresh: _reload,
+                              child: CustomScrollView(
+                                slivers: [
+                                  for (final entry in grouped.entries) ...[
+                                    SliverPersistentHeader(
+                                      pinned: true,
+                                      delegate: _YearHeaderDelegate(
+                                        yearText: entry.key.toString(),
+                                      ),
+                                    ),
+                                    SliverList(
+                                      delegate: SliverChildBuilderDelegate(
+                                        (ctx, i) {
+                                          final f = entry.value[i];
+                                          final int pos =
+                                              indexByKey[flightKey(f)] ?? -1;
+                                          final bool showSubtotals =
+                                              !_isFilterActive &&
+                                                  pos >= 0 &&
+                                                  ((pos + 1) % 10 == 0);
+
+                                          final int pageIndex = showSubtotals
+                                              ? ((pos ~/ 10) + 1)
+                                              : 0;
+                                          final int pageStart = showSubtotals
+                                              ? ((pageIndex - 1) * 10)
+                                              : 0;
+                                          final int pageEnd = showSubtotals
+                                              ? (((pageStart + 10) <=
+                                                      visible.length)
+                                                  ? (pageStart + 10)
+                                                  : visible.length)
+                                              : 0;
+
+                                          final double pageTime = showSubtotals
+                                              ? (prefix[pageEnd] -
+                                                  prefix[pageStart])
+                                              : 0.0;
+                                          final double totalsTime =
+                                              showSubtotals
+                                                  ? (_baselineTotalsFlightTime +
+                                                      prefix[pageEnd])
+                                                  : 0.0;
+
+                                          final item = Padding(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 12,
+                                              vertical: 6,
+                                            ),
+                                            child: LogbookInfoButton(
+                                              orderNumber: f.orderNumber,
+                                              dateTitle: l.t("date"),
+                                              dateText: f.dayMonthText,
+                                              blockTitle: l.t("time"),
+                                              blockTimeText: f.blockTime,
+                                              fromTitle: l.t("flight_from"),
+                                              fromFlagEmoji: f.fromFlagEmoji,
+                                              fromIcao: f.fromIcao,
+                                              aircraftTitle: l.t("airplane"),
+                                              aircraftRegistration:
+                                                  f.aircraftRegistration,
+
+                                              // Ajustes opcionales (si quieres activarlos aquí):
+                                              titleFontSize: 10,
+                                              valueFontSize: 12,
+                                              bigValueFontSize: 14,
+                                              orderFontSize: 14,
+                                              flagFontSize: 11,
+                                              aircraftFontSize: 12,
+
+                                              onTap: () async {
+                                                if (_flightsLocked) return;
+                                                final Object? rawId = f.id;
+
+                                                final int? flightId = rawId
+                                                        is int
+                                                    ? rawId
+                                                    : (rawId is num
+                                                        ? rawId.toInt()
+                                                        : int.tryParse(
+                                                            rawId?.toString() ??
+                                                                ''));
+
+                                                if (flightId == null) {
+                                                  ScaffoldMessenger.of(context)
+                                                      .showSnackBar(
+                                                    SnackBar(
+                                                      content: Text(
+                                                          '${l.t("error")}: id inválido'),
+                                                    ),
+                                                  );
+
+                                                  return;
+                                                }
+
+                                                final bool? changed =
+                                                    await Navigator.push<bool>(
+                                                  context,
+                                                  MaterialPageRoute(
+                                                    builder: (_) =>
+                                                        NewFlightPage(
+                                                            flightId: flightId),
+                                                  ),
+                                                );
+
+                                                if (changed == true) {
+                                                  await _reload();
+                                                }
+                                              },
+                                            ),
+                                          );
+                                          final Widget itemWithSubtotal =
+                                              Column(
+                                            children: [
+                                              item,
+                                              if (showSubtotals)
+                                                _buildSubtotalsSeparator(
+                                                  l: l,
+                                                  pageIndex: pageIndex,
+                                                  pageTime: pageTime,
+                                                  totalsTime: totalsTime,
+                                                ),
+                                            ],
+                                          );
+
+                                          final idStr = (f.id ??
+                                                  f.startDate
+                                                      .millisecondsSinceEpoch)
+                                              .toString();
+                                          return KeyedSubtree(
+                                            key: ValueKey('flight_$idStr'),
+                                            child: _wrapReorderableItem(
+                                                context, f, itemWithSubtotal),
+                                          );
+                                        },
+                                        childCount: entry.value.length,
+                                      ),
+                                    ),
+                                    const SliverToBoxAdapter(
+                                        child: SizedBox(height: 8)),
+                                  ],
+                                  const SliverToBoxAdapter(
+                                    child: SizedBox(height: 90),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+              ),
+            ],
           ),
-        ],
+          Positioned(
+            right: 16,
+            bottom: 16,
+            child: Opacity(
+              opacity: _flightsLocked ? 0.45 : 1.0,
+              child: AbsorbPointer(
+                absorbing: _flightsLocked,
+                child: ButtonStyles.squareAddButton(
+                  context: context,
+                  onTap: _openNewFlight,
+                ),
+              ),
+            ),
+          ),
+        ]),
       ),
     );
   }
@@ -851,7 +1674,7 @@ class LogbookInfoButton extends StatelessWidget {
                   child: Text(orderNumber, style: _orderStyle(context)),
                 ),
 
-                const SizedBox(width: 5),
+                const SizedBox(width: 3),
 
                 // (2) Logo
                 SizedBox(
@@ -864,14 +1687,14 @@ class LogbookInfoButton extends StatelessWidget {
                   ),
                 ),
 
-                const SizedBox(width: 4),
+                const SizedBox(width: 3),
 
                 // Separador
                 Container(
                     width: 1,
                     height: 40,
                     color: Colors.white.withOpacity(0.20)),
-                const SizedBox(width: 10),
+                const SizedBox(width: 7),
 
                 // (3-4) Fecha
                 Expanded(
@@ -889,7 +1712,7 @@ class LogbookInfoButton extends StatelessWidget {
                   ),
                 ),
 
-                const SizedBox(width: 10),
+                const SizedBox(width: 2),
                 Container(
                     width: 1,
                     height: 40,
@@ -912,7 +1735,7 @@ class LogbookInfoButton extends StatelessWidget {
                   ),
                 ),
 
-                const SizedBox(width: 10),
+                const SizedBox(width: 4),
                 Container(
                     width: 1,
                     height: 40,
@@ -921,7 +1744,7 @@ class LogbookInfoButton extends StatelessWidget {
 
                 // (7-8) Desde
                 Expanded(
-                  flex: 3,
+                  flex: 2,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -935,7 +1758,7 @@ class LogbookInfoButton extends StatelessWidget {
                               fromFlagEmoji.isEmpty ? '🏳️' : fromFlagEmoji,
                               style: TextStyle(fontSize: flagFontSize ?? 18),
                             ),
-                            const SizedBox(width: 6),
+                            const SizedBox(width: 1),
                             Flexible(
                               child: Text(
                                 fromIcao,

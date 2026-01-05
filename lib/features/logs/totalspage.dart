@@ -454,6 +454,39 @@ class _TotalsPageState extends State<TotalsPage> {
     }
   }
 
+  Future<void> _persistLockState() async {
+    try {
+      final db = await DBHelper.getDB();
+      await _ensureTable(db);
+
+      final data = <String, Object?>{
+        'isLocked': _isLocked ? 1 : 0,
+      };
+
+      if (_rowId == null) {
+        data['createdAt'] = DateTime.now().toIso8601String();
+        _rowId = await db.insert(_tableName, data);
+      } else {
+        final updated = await db.update(
+          _tableName,
+          data,
+          where: 'id = ?',
+          whereArgs: [_rowId],
+        );
+
+        if (updated == 0) {
+          data['createdAt'] = DateTime.now().toIso8601String();
+          _rowId = await db.insert(_tableName, data);
+        }
+      }
+    } catch (e, st) {
+      // ignore: avoid_print
+      print('Error saving lock state: $e');
+      // ignore: avoid_print
+      print(st);
+    }
+  }
+
   // ================== UI HELPERS ==================
 
   InputDecoration _numberDecoration() {
@@ -520,26 +553,22 @@ class _TotalsPageState extends State<TotalsPage> {
                 child: TextField(
                   controller: ctrl,
                   enabled: !_isLocked,
-                  textAlign: TextAlign.center,
-                  keyboardType: decimal
-                      ? const TextInputType.numberWithOptions(decimal: true)
-                      : TextInputType.number,
-                  inputFormatters: <TextInputFormatter>[
-                    decimal
-                        ? FilteringTextInputFormatter.allow(RegExp(r'[0-9\.,]'))
-                        : FilteringTextInputFormatter.digitsOnly,
-                  ],
+                  keyboardType: TextInputType.numberWithOptions(
+                    decimal: decimal,
+                    signed: false,
+                  ),
+                  inputFormatters: decimal
+                      ? [
+                          FilteringTextInputFormatter.allow(RegExp(r'[\d,\.]')),
+                        ]
+                      : [
+                          FilteringTextInputFormatter.digitsOnly,
+                        ],
+                  decoration: _numberDecoration(),
                   style: const TextStyle(
                     color: AppColors.teal1,
                     fontWeight: FontWeight.bold,
                   ),
-                  decoration: _numberDecoration(),
-                  onTap: () {
-                    if (_isLocked) return;
-                    if (decimal && _isZeroDecimalText(ctrl.text)) {
-                      ctrl.clear();
-                    }
-                  },
                 ),
               ),
             );
@@ -551,7 +580,7 @@ class _TotalsPageState extends State<TotalsPage> {
 
   Widget _decimalRow(String label, TextEditingController ctrl) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.only(bottom: 10),
       child: Row(
         children: <Widget>[
           Expanded(
@@ -569,7 +598,7 @@ class _TotalsPageState extends State<TotalsPage> {
 
   Widget _integerRow(String label, TextEditingController ctrl) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.only(bottom: 10),
       child: Row(
         children: <Widget>[
           Expanded(
@@ -625,10 +654,11 @@ class _TotalsPageState extends State<TotalsPage> {
                               _isLocked ? Icons.lock : Icons.lock_open,
                               color: Colors.white,
                             ),
-                            onPressed: () {
+                            onPressed: () async {
                               setState(() {
                                 _isLocked = !_isLocked;
                               });
+                              await _persistLockState();
                             },
                           ),
                         ],
@@ -693,7 +723,7 @@ class _TotalsPageState extends State<TotalsPage> {
                         _otherAircraftCtrl,
                       ),
                       _decimalRow(
-                        l.t("totals_flight_simulator"),
+                        l.t("totals_simulator"),
                         _simulatorCtrl,
                       ),
 
@@ -704,15 +734,15 @@ class _TotalsPageState extends State<TotalsPage> {
                         title: l.t("totals_flight_conditions_section"),
                       ),
                       _decimalRow(
-                        l.t("totals_condition_day"),
+                        l.t("totals_conditions_day"),
                         _condDayCtrl,
                       ),
                       _decimalRow(
-                        l.t("totals_condition_night"),
+                        l.t("totals_conditions_night"),
                         _condNightCtrl,
                       ),
                       _decimalRow(
-                        l.t("totals_condition_ifr"),
+                        l.t("totals_conditions_ifr"),
                         _condIfrCtrl,
                       ),
 

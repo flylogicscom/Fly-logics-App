@@ -85,7 +85,7 @@ class ButtonStyles {
             border: Border.all(color: color, width: 1),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.22),
+                color: AppColors.teal3,
                 blurRadius: 10,
                 offset: const Offset(0, 4),
               ),
@@ -101,20 +101,19 @@ class ButtonStyles {
     );
   }
 
-  // 4. Pill add con gradiente
+// 4. Pill add con gradiente
   static Widget pillAdd({
     required BuildContext context,
     required String label,
     required VoidCallback onTap,
     Widget? icon, // icono opcional
     List<Color>? gradientColors,
-    Color borderColor = AppColors.white,
+    Color borderColor = AppColors.teal3,
     double widthFactor = 0.6,
     double height = 38,
   }) {
-    // Solo tema “oscuro”: usamos siempre el gradiente dark por defecto
     final List<Color> colors =
-        gradientColors ?? const <Color>[AppColors.teal2, AppColors.teal3];
+        gradientColors ?? const <Color>[AppColors.teal1, AppColors.teal2];
 
     return FractionallySizedBox(
       widthFactor: widthFactor,
@@ -148,11 +147,16 @@ class ButtonStyles {
                     const Icon(Icons.add, color: Colors.white, size: 18),
                     const SizedBox(width: 10),
                   ],
-                  Text(
-                    label.toUpperCase(),
-                    textAlign: TextAlign.center,
-                    style: AppTextStyles.buttonText.copyWith(
-                      color: AppColors.white,
+                  Flexible(
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        label.toUpperCase(),
+                        textAlign: TextAlign.center,
+                        style: AppTextStyles.buttonText.copyWith(
+                          color: AppColors.white,
+                        ),
+                      ),
                     ),
                   ),
                 ],
@@ -169,8 +173,8 @@ class ButtonStyles {
     required String label,
     required VoidCallback onTap,
     List<Widget> icons = const [],
-    List<Color> gradientColors = const [AppColors.teal2, AppColors.teal4],
-    Color borderColor = AppColors.teal1,
+    List<Color> gradientColors = const [AppColors.teal1, AppColors.teal2],
+    Color borderColor = AppColors.teal3,
   }) {
     return InkWell(
       onTap: onTap,
@@ -185,7 +189,7 @@ class ButtonStyles {
             end: Alignment.centerRight,
           ),
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: borderColor, width: 3),
+          border: Border.all(color: borderColor, width: 1),
           boxShadow: [
             BoxShadow(
               color: AppColors.black.withOpacity(0.15),
@@ -200,7 +204,7 @@ class ButtonStyles {
               child: Text(
                 label,
                 style: AppTextStyles.body.copyWith(
-                  fontSize: 15,
+                  fontSize: 13,
                   fontWeight: FontWeight.w600,
                   color: AppColors.white,
                 ),
@@ -402,13 +406,13 @@ class ButtonStyles {
     // Solo tema oscuro: priorizamos darkGradient, luego lightGradient
     final List<Color> colors = darkGradient ??
         lightGradient ??
-        <Color>[AppColors.teal2, AppColors.teal4];
+        <Color>[AppColors.teal1, AppColors.teal2];
 
-    const double boxSize = 52;
-    const double iconSize = 25;
-    const double buttonRadius = 12;
+    const double boxSize = 36;
+    const double iconSize = 20;
+    const double buttonRadius = 10;
     final BorderRadius btnBR = BorderRadius.circular(buttonRadius);
-    final BorderRadius iconBR = BorderRadius.circular(10);
+    final BorderRadius iconBR = BorderRadius.circular(6);
 
     return Material(
       color: Colors.transparent,
@@ -423,11 +427,11 @@ class ButtonStyles {
               begin: Alignment.centerLeft,
               end: Alignment.centerRight,
             ),
-            border: Border.all(color: AppColors.teal4, width: 2),
+            border: Border.all(color: AppColors.teal4, width: 1),
             borderRadius: btnBR,
           ),
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 0, 2, 0),
+            padding: const EdgeInsets.fromLTRB(14, 0, 08, 0),
             child: Row(
               children: [
                 // IZQUIERDA
@@ -437,8 +441,8 @@ class ButtonStyles {
                     if (leftIconAsset != null) ...[
                       SvgPicture.asset(
                         leftIconAsset,
-                        width: 22,
-                        height: 22,
+                        width: 20,
+                        height: 20,
                         colorFilter: const ColorFilter.mode(
                           AppColors.white,
                           BlendMode.srcIn,
@@ -465,15 +469,15 @@ class ButtonStyles {
                         width: boxSize,
                         height: boxSize,
                         decoration: BoxDecoration(
-                          color: AppColors.white,
-                          border: Border.all(color: AppColors.teal3, width: 2),
+                          color: AppColors.teal2,
+                          border: Border.all(color: AppColors.teal4, width: 1),
                           borderRadius: iconBR,
                         ),
                         child: Center(
                           child: Icon(
                             locked ? Icons.lock : Icons.lock_open,
                             size: iconSize,
-                            color: AppColors.teal3,
+                            color: AppColors.white,
                           ),
                         ),
                       )
@@ -595,7 +599,7 @@ class ButtonStyles {
     // Solo tema oscuro: priorizamos darkGradient, luego lightGradient
     final List<Color> colors = darkGradient ??
         lightGradient ??
-        <Color>[AppColors.teal2, AppColors.teal4];
+        <Color>[AppColors.teal2, AppColors.teal1];
 
     const double borderRadiusValue = 12;
     final BorderRadius borderRadius = BorderRadius.circular(borderRadiusValue);
@@ -936,7 +940,7 @@ class ButtonStyles {
       final Color bg = customColor ?? Colors.white.withOpacity(0.18);
 
       return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
         decoration: BoxDecoration(
           color: bg,
           borderRadius: BorderRadius.circular(5),
@@ -1175,7 +1179,7 @@ class ButtonStyles {
                 end: Alignment.bottomRight,
               ),
               border: Border.all(
-                color: Colors.white.withOpacity(0.6),
+                color: AppColors.teal3.withOpacity(0.6),
                 width: 1.2,
               ),
             ),

@@ -55,8 +55,7 @@ dev_dependencies:
 flutter_launcher_icons:
   android: true
   ios: true
-  image_path: "assets/icons/flylogicsicon.png"
-
+  image_path: "assets/icons/logoflylogics.png"
 
 flutter:
   uses-material-design: true

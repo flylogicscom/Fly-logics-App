@@ -1,4 +1,7 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
@@ -17,21 +20,34 @@ class _UIPreviewPageState extends State<UIPreviewPage> {
   bool _isDeleting = false;
   bool _isExporting = false;
 
+  // NOTES (ya existía)
   final TextEditingController _titleCtrl = TextEditingController();
   final TextEditingController _contentCtrl = TextEditingController();
   List<Map<String, Object?>> _notes = [];
+
+  // FLIGHTS (nuevo)
+  bool _loadingFlights = false;
+  List<Map<String, Object?>> _flights = [];
 
   @override
   void initState() {
     super.initState();
     _loadDBPath();
     _loadNotes();
+    _loadFlights();
+  }
+
+  @override
+  void dispose() {
+    _titleCtrl.dispose();
+    _contentCtrl.dispose();
+    super.dispose();
   }
 
   Future<void> _loadDBPath() async {
     final path = await getDatabasesPath();
     final fullPath = p.join(path, 'app.db');
-    setState(() => _dbPath = fullPath);
+    if (mounted) setState(() => _dbPath = fullPath);
   }
 
   Future<void> _loadNotes() async {
@@ -162,7 +178,120 @@ class _UIPreviewPageState extends State<UIPreviewPage> {
       ),
     );
     await _loadNotes();
+    await _loadFlights();
   }
+
+  // ===================== FLIGHTS (nuevo) =====================
+
+  Future<void> _loadFlights() async {
+    if (_loadingFlights) return;
+    setState(() => _loadingFlights = true);
+
+    try {
+      final db = await dbh.DBHelper.getDB();
+
+      // Últimos 40 vuelos
+      final rows = await db.query(
+        dbh.DBHelper.tableFlights,
+        orderBy: 'createdAt DESC',
+        limit: 40,
+      );
+
+      if (!mounted) return;
+      setState(() => _flights = rows);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Error cargando flights: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _loadingFlights = false);
+    }
+  }
+
+  String _prettyJson(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      return const JsonEncoder.withIndent('  ').convert(decoded);
+    } catch (_) {
+      return raw; // no era JSON válido
+    }
+  }
+
+  Future<void> _openFlightDialog(Map<String, Object?> row) async {
+    final id = row['id'];
+    final fromIcao = (row['fromIcao'] ?? '').toString();
+    final toIcao = (row['toIcao'] ?? '').toString();
+    final reg = (row['aircraftRegistration'] ?? '').toString();
+    final pic = (row['pic'] ?? '').toString();
+
+    final startMs = row['startDate'] as int?;
+    final createdMs = row['createdAt'] as int?;
+    final startText = (startMs == null)
+        ? '-'
+        : DateTime.fromMillisecondsSinceEpoch(startMs).toString();
+    final createdText = (createdMs == null)
+        ? '-'
+        : DateTime.fromMillisecondsSinceEpoch(createdMs).toString();
+
+    final rawJson = (row['dataJson'] ?? '').toString();
+    final pretty = _prettyJson(rawJson);
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('✈️ Flight id: $id'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Start: $startText'),
+                Text('Created: $createdText'),
+                const SizedBox(height: 8),
+                Text('From → To: $fromIcao → $toIcao'),
+                Text('Reg: $reg'),
+                Text('PIC: $pic'),
+                const Divider(height: 24),
+                const Text('dataJson:'),
+                const SizedBox(height: 6),
+                SelectableText(
+                  pretty,
+                  style: const TextStyle(fontSize: 12, color: Colors.black87),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: rawJson));
+              if (!mounted) return;
+              // ignore: use_build_context_synchronously
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('✅ dataJson copiado al portapapeles'),
+                  backgroundColor: Colors.green,
+                ),
+              );
+            },
+            child: const Text('Copiar JSON'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cerrar'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ===================== UI =====================
 
   @override
   Widget build(BuildContext context) {
@@ -189,6 +318,7 @@ class _UIPreviewPageState extends State<UIPreviewPage> {
               style: const TextStyle(fontSize: 14, color: Colors.grey),
             ),
             const Divider(height: 24),
+
             ElevatedButton.icon(
               onPressed: _isExporting ? null : _handleExportDB,
               icon: const Icon(Icons.upload_file, color: Colors.white),
@@ -214,7 +344,74 @@ class _UIPreviewPageState extends State<UIPreviewPage> {
                 padding: const EdgeInsets.symmetric(vertical: 14),
               ),
             ),
+
             const SizedBox(height: 24),
+
+            // ===================== FLIGHTS =====================
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '✈️ Vuelos (tabla flights)',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                ),
+                IconButton(
+                  onPressed: _loadingFlights ? null : _loadFlights,
+                  icon: _loadingFlights
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.refresh),
+                  tooltip: 'Actualizar',
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (_flights.isEmpty && !_loadingFlights)
+              const Text(
+                'No hay vuelos (o no se pudieron cargar).',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.grey),
+              )
+            else
+              ListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: _flights.length,
+                itemBuilder: (context, i) {
+                  final f = _flights[i];
+                  final id = f['id'];
+                  final fromIcao = (f['fromIcao'] ?? '').toString();
+                  final toIcao = (f['toIcao'] ?? '').toString();
+                  final reg = (f['aircraftRegistration'] ?? '').toString();
+
+                  final startMs = f['startDate'] as int?;
+                  final start = startMs == null
+                      ? '-'
+                      : DateTime.fromMillisecondsSinceEpoch(startMs)
+                          .toString()
+                          .split('.')
+                          .first;
+
+                  return Card(
+                    margin: const EdgeInsets.symmetric(vertical: 6),
+                    child: ListTile(
+                      onTap: () => _openFlightDialog(f),
+                      leading: const Icon(Icons.flight_takeoff),
+                      title: Text('id $id • $fromIcao → $toIcao'),
+                      subtitle: Text('Start: $start • Reg: $reg'),
+                      trailing: const Icon(Icons.chevron_right),
+                    ),
+                  );
+                },
+              ),
+
+            const Divider(height: 30),
+
+            // ===================== NOTES (ya existía) =====================
             Text(
               '📝 Notas (CRUD Completo)',
               style: Theme.of(context).textTheme.titleLarge,
@@ -271,7 +468,8 @@ class _UIPreviewPageState extends State<UIPreviewPage> {
                         builder: (context) => AlertDialog(
                           title: const Text('Eliminar nota'),
                           content: const Text(
-                              '¿Estás seguro de que deseas eliminar esta nota?'),
+                            '¿Estás seguro de que deseas eliminar esta nota?',
+                          ),
                           actions: [
                             TextButton(
                               onPressed: () => Navigator.pop(context, false),

@@ -1,4 +1,4 @@
-// lib/features/logs/first_run_gate.dart  (solo referencia; no cambies tu Home)
+// lib/features/auth/first_run_gate.dart
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -18,29 +18,35 @@ class FirstRunGate extends StatefulWidget {
 }
 
 class _FirstRunGateState extends State<FirstRunGate> {
-  late final Future<bool> _firstRunFuture = _isFirstRun();
+  bool? _isFirstRun; // null = aún cargando prefs
 
-  Future<bool> _isFirstRun() async {
+  @override
+  void initState() {
+    super.initState();
+    _loadFirstRunFlag();
+  }
+
+  Future<void> _loadFirstRunFlag() async {
     final prefs = await SharedPreferences.getInstance();
     final seen = prefs.getBool('has_run') ?? false;
+
     if (!seen) {
       await prefs.setBool('has_run', true);
-      return true;
     }
-    return false;
+
+    if (!mounted) return;
+    setState(() => _isFirstRun = !seen);
   }
 
   @override
   Widget build(BuildContext context) {
-    return FutureBuilder<bool>(
-      future: _firstRunFuture,
-      builder: (context, snap) {
-        if (!snap.hasData) return const _Splash();
-        final isFirstRun = snap.data!;
-        if (isFirstRun) return const RegisterPage();
-        return const AuthGate();
-      },
-    );
+    final v = _isFirstRun;
+
+    // Sin splash artesanal: pantalla vacía mientras se resuelve SharedPreferences
+    if (v == null) return const SizedBox.shrink();
+
+    if (v) return const RegisterPage();
+    return const AuthGate();
   }
 }
 
@@ -52,25 +58,17 @@ class AuthGate extends StatelessWidget {
     return StreamBuilder<User?>(
       stream: FirebaseAuth.instance.authStateChanges(),
       builder: (context, snap) {
+        // Sin splash artesanal: pantalla vacía mientras Firebase entrega estado
         if (snap.connectionState == ConnectionState.waiting) {
-          return const _Splash();
+          return const SizedBox.shrink();
         }
+
         if (snap.hasData) {
-          // 🔁 SESIÓN ACTIVA → HomePage (cámbialo a LogsPage/UIPreviewPage si prefieres)
           return const HomePage();
         }
-        // 🚪 SIN SESIÓN → Login
+
         return const LoginPage();
       },
     );
-  }
-}
-
-class _Splash extends StatelessWidget {
-  const _Splash();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Scaffold(body: Center(child: CircularProgressIndicator()));
   }
 }
