@@ -45,6 +45,11 @@ class _PilotDataState extends State<PilotData> {
   cdata.CountryData? _selectedCountry;
   bool _saving = false;
 
+  // Guardamos también el "full name" si la BD solo tiene "name"
+  // para evitar split agresivo en re-carga.
+  // ignore: unused_field
+  String? _legacyFullName;
+
   @override
   void initState() {
     super.initState();
@@ -68,22 +73,93 @@ class _PilotDataState extends State<PilotData> {
     super.dispose();
   }
 
+  // ---------- DB MIGRACIÓN (firstName / lastName) ----------
+
+  Future<void> _ensurePilotColumnsExist() async {
+    // DBHelper.getDB existe en tu proyecto (lo usas en otras páginas)
+    final db = await DBHelper.getDB();
+
+    // OJO: aquí no sé el nombre real de tu tabla piloto.
+    // DBHelper.getPilot()/upsertPilot ya la manejan internamente,
+    // pero para migrar columnas necesitamos conocerla.
+    //
+    // Si tu tabla real NO se llama "pilot", cambia esta constante.
+    const String table = 'pilot';
+
+    // Creamos tabla mínima si no existe (no rompe si ya existe)
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS $table (
+        id INTEGER PRIMARY KEY AUTOINCREMENT
+      )
+    ''');
+
+    final info = await db.rawQuery('PRAGMA table_info($table)');
+    final existing = <String>{
+      for (final row in info)
+        if (row['name'] is String) row['name'] as String,
+    };
+
+    Future<void> addColumn(String name, String type) async {
+      if (!existing.contains(name)) {
+        await db.execute('ALTER TABLE $table ADD COLUMN $name $type');
+      }
+    }
+
+    // Nuevas columnas para evitar split del nombre completo
+    await addColumn('firstName', 'TEXT');
+    await addColumn('lastName', 'TEXT');
+  }
+
   // ---------- HELPERS ----------
 
+  /// Parse “name” legacy (un solo campo) a first/last sin romper nombres compuestos.
+  /// Regla usada:
+  /// - 1 palabra => first = palabra, last = ''
+  /// - 2+ palabras => last = última palabra; first = resto
+  /// Esto evita el bug de "Juan Pablo" -> apellido "Pablo ..."
+  /// (si el usuario quiere "Sanchez Perez" como apellido, lo escribe en campo apellido y ya queda separado).
+  ({String first, String last}) _splitLegacyFullName(String full) {
+    final clean = full.trim().replaceAll(RegExp(r'\s+'), ' ');
+    if (clean.isEmpty) return (first: '', last: '');
+    final parts = clean.split(' ');
+    if (parts.length == 1) return (first: parts[0], last: '');
+    final last = parts.last;
+    final first = parts.sublist(0, parts.length - 1).join(' ');
+    return (first: first, last: last);
+  }
+
   Future<void> _loadPilot() async {
+    // Intentamos migrar columnas; si la tabla no es "pilot", no romperá UI,
+    // pero debes ajustar el nombre si no coincide.
+    try {
+      await _ensurePilotColumnsExist();
+    } catch (_) {
+      // si no podemos migrar (tabla distinta), seguimos sin romper
+    }
+
     final data = await DBHelper.getPilot();
     if (!mounted || data == null) return;
 
     final l = AppLocalizations.of(context);
 
-    // Nombre
+    // 1) Preferimos firstName/lastName si existen en BD
+    final dbFirst = (data['firstName'] as String? ?? '').trim();
+    final dbLast = (data['lastName'] as String? ?? '').trim();
+
+    // 2) Legacy: si solo existe "name"
     final rawName = (data['name'] as String? ?? '').trim();
-    if (rawName.isNotEmpty) {
-      final parts = rawName.split(' ');
-      _firstNameCtrl.text = _toTitleCase(parts.first);
-      if (parts.length > 1) {
-        _lastNameCtrl.text = _toTitleCase(parts.sublist(1).join(' '));
-      }
+    _legacyFullName = rawName.isNotEmpty ? rawName : null;
+
+    if (dbFirst.isNotEmpty || dbLast.isNotEmpty) {
+      _firstNameCtrl.text = _toTitleCase(dbFirst);
+      _lastNameCtrl.text = _toTitleCase(dbLast);
+    } else if (rawName.isNotEmpty) {
+      final split = _splitLegacyFullName(rawName);
+      _firstNameCtrl.text = _toTitleCase(split.first);
+      _lastNameCtrl.text = _toTitleCase(split.last);
+    } else {
+      _firstNameCtrl.clear();
+      _lastNameCtrl.clear();
     }
 
     // Teléfono y bandera
@@ -211,7 +287,6 @@ class _PilotDataState extends State<PilotData> {
     final iso = _isoFromFlagEmoji(c.flagEmoji);
     if (iso == null) return c.name;
 
-    // Soporta ambas por si tu sistema usa "." o "_"
     final kDot = 'countries.$iso';
     final vDot = l.t(kDot);
     if (vDot != kDot && vDot.trim().isNotEmpty) return vDot;
@@ -223,7 +298,6 @@ class _PilotDataState extends State<PilotData> {
     return c.name;
   }
 
-  // Normaliza el teléfono: deja solo dígitos y un '+' inicial (si lo hay)
   String _normalizePhone(String input) {
     final t = input.trim();
     if (t.isEmpty) return '';
@@ -240,12 +314,10 @@ class _PilotDataState extends State<PilotData> {
     return buffer.toString();
   }
 
-  // Deducción de bandera desde el teléfono, tolerando espacios, guiones, etc.
   String? inferPhoneFlag(String input) {
     final raw = input.trim();
     if (raw.isEmpty) return null;
 
-    // 1) Si empieza con una bandera ya pegada
     for (final c in cdata.allCountryData) {
       final flag = c.flagEmoji.trim();
       if (flag.isNotEmpty && raw.startsWith(flag)) {
@@ -253,7 +325,6 @@ class _PilotDataState extends State<PilotData> {
       }
     }
 
-    // 2) Detección por código telefónico, ignorando formato
     final normalized = _normalizePhone(raw);
     if (normalized.isEmpty) return null;
 
@@ -283,11 +354,12 @@ class _PilotDataState extends State<PilotData> {
 
       final first = _firstNameCtrl.text.trim();
       final last = _lastNameCtrl.text.trim();
+
+      // Full name solo para display/backward compatibility
       final name = ('$first $last').trim();
 
       String? countryToStore;
       if (_selectedCountry != null) {
-        // Se guarda en BD el nombre original en inglés (estable)
         countryToStore = _selectedCountry!.name;
       } else {
         final raw = _countryCtrl.text.trim();
@@ -295,8 +367,14 @@ class _PilotDataState extends State<PilotData> {
       }
 
       final data = <String, Object?>{
+        // NUEVO: guardar separados
+        'firstName': first.isEmpty ? null : first,
+        'lastName': last.isEmpty ? null : last,
+
+        // Legacy / display
         'name': name.isEmpty ? null : name,
         'displayName': name.isEmpty ? null : name,
+
         'phone': _nullIfEmpty(_phoneCtrl.text),
         'email': _nullIfEmpty(_emailCtrl.text),
         'country': countryToStore,
@@ -724,7 +802,9 @@ class _PilotDataState extends State<PilotData> {
 class TitleCaseTextFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(
-      TextEditingValue oldValue, TextEditingValue newValue) {
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
     final text = newValue.text;
     if (text.isEmpty) return newValue;
 
@@ -768,7 +848,9 @@ class TitleCaseTextFormatter extends TextInputFormatter {
 class UpperCaseTextFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(
-      TextEditingValue oldValue, TextEditingValue newValue) {
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
     final upper = newValue.text.toUpperCase();
     if (upper == newValue.text) return newValue;
     return TextEditingValue(

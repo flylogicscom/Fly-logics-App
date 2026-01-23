@@ -10,6 +10,7 @@ import 'package:fly_logicd_logbook_app/common/custom_app_bar.dart';
 import 'package:fly_logicd_logbook_app/common/button_styles.dart';
 import 'package:fly_logicd_logbook_app/l10n/app_localizations.dart';
 import 'package:fly_logicd_logbook_app/utils/db_helper.dart';
+import 'package:fly_logicd_logbook_app/features/logs/popup_totals.dart';
 
 // Abre la pantalla de edición del vuelo
 import 'package:fly_logicd_logbook_app/features/newflight/newflight.dart';
@@ -94,6 +95,59 @@ class LogsPageList extends StatefulWidget {
 }
 
 class _LogsPageListState extends State<LogsPageList> {
+  void _scheduleStickyYearUpdate() {
+    if (_yearUpdateScheduled) return;
+    _yearUpdateScheduled = true;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _yearUpdateScheduled = false;
+      _updateStickyYearFromAnchors();
+    });
+  }
+
+  void _updateStickyYearFromAnchors() {
+    final viewportCtx = _yearsViewportKey.currentContext;
+    if (viewportCtx == null) return;
+
+    final viewportBox = viewportCtx.findRenderObject() as RenderBox?;
+    if (viewportBox == null || !viewportBox.hasSize) return;
+
+    final viewportTopY = viewportBox.localToGlobal(Offset.zero).dy;
+
+    int? bestYear;
+    double bestDy = double.negativeInfinity;
+
+    for (final entry in _yearAnchorKeys.entries) {
+      final ctx = entry.value.currentContext;
+      if (ctx == null) continue;
+      final box = ctx.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize) continue;
+
+      final dy = box.localToGlobal(Offset.zero).dy;
+
+      // “año actual” = el último header que ya pasó por arriba del viewport
+      if (dy <= viewportTopY + 1 && dy > bestDy) {
+        bestDy = dy;
+        bestYear = entry.key;
+      }
+    }
+
+    if (bestYear == null) {
+      // si ninguno “pasó”, usa el primero (arriba)
+      if (_yearAnchorKeys.isNotEmpty) {
+        bestYear = _yearAnchorKeys.keys.first;
+      }
+    }
+
+    final newText = bestYear?.toString() ?? '';
+    if (newText != _stickyYearText) {
+      setState(() => _stickyYearText = newText);
+    }
+  }
+
+  final ScrollController _scrollCtrl = ScrollController();
+  bool _didAutoScrollToBottom = false;
+
   final _searchCtrl = TextEditingController();
 
   bool _loading = false;
@@ -103,13 +157,31 @@ class _LogsPageListState extends State<LogsPageList> {
 
   static const String _mainLogStateTable = 'mainlog_state';
   static const String _mainLogSortTable = 'mainlog_day_sort';
+  final ScrollController scrollCtrl = ScrollController();
+  bool _autoScrolledToBottom = false;
+
+  void _scrollToBottomOnce() {
+    if (_autoScrolledToBottom) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_scrollCtrl.hasClients) {
+        _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
+      }
+      _autoScrolledToBottom = true;
+    });
+  }
+
+  final GlobalKey _yearsViewportKey = GlobalKey();
+  final Map<int, GlobalKey> _yearAnchorKeys = <int, GlobalKey>{};
+  String _stickyYearText = '';
+  bool _yearUpdateScheduled = false;
 
   Map<int, int> _sortIndexById = <int, int>{};
 
   // === NUEVO (solo para mejorar drag preview) ===
   Map<int, int>? _sortIndexSnapshot;
-  int? _lastPreviewDraggedId;
-  int? _lastPreviewTargetId;
+  String? _lastPreviewDraggedId;
+  String? _lastPreviewTargetId;
 
   // Filtros
   int? _filterYear;
@@ -123,7 +195,9 @@ class _LogsPageListState extends State<LogsPageList> {
     super.initState();
     _loadFlightsLockState();
     _loadBaselineTotalsFlightTime(); // <-- AÑADIR
-    _reload();
+    _reload(scrollToBottom: true);
+    _scheduleInitialScrollToBottom();
+    _scrollCtrl.addListener(_scheduleStickyYearUpdate);
   }
 
   int? _asIntId(Object? rawId) {
@@ -330,6 +404,10 @@ class _LogsPageListState extends State<LogsPageList> {
       _sortIndexById = newSort;
       _all = _computeOrdering(_all);
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _updateStickyYearFromAnchors();
+    });
 
     // persiste (sin reload)
     await _saveDaySortOrder(day, dayFlights);
@@ -341,9 +419,9 @@ class _LogsPageListState extends State<LogsPageList> {
   }
 
   // === SUBTOTALES (cada 10 vuelos) ===
+
   double _baselineTotalsFlightTime =
       0.0; // viene de TotalsPage (tabla previous_totals)
-
   Future<void> _loadBaselineTotalsFlightTime() async {
     try {
       final db = await DBHelper.getDB();
@@ -417,15 +495,33 @@ class _LogsPageListState extends State<LogsPageList> {
     return '$withDots,$decPart';
   }
 
-  void _openSubtotalsPopup(int pageIndex) {
-    // Todo: definir más tarde (por ahora no hace nada)
+  Future<void> _openSubtotalsPopup({
+    required int pageIndex,
+    required double pageTime,
+    required double previousTime,
+    required double totalsTime,
+    required List<int> pageFlightIds,
+    required List<int> previousFlightIds,
+  }) async {
+    await PopupTotalsDialog.show(
+      context,
+      pageIndex: pageIndex,
+      totalPageFlightTime: pageTime,
+      totalPreviousFlightTime: previousTime,
+      totalToDateFlightTime: totalsTime,
+      pageFlightIds: pageFlightIds,
+      previousFlightIds: previousFlightIds,
+    );
   }
 
   Widget _buildSubtotalsSeparator({
     required AppLocalizations l,
     required int pageIndex,
     required double pageTime,
+    required double previousTime,
     required double totalsTime,
+    required List<int> pageFlightIds,
+    required List<int> previousFlightIds,
   }) {
     final pageStr = pageIndex.toString().padLeft(2, '0');
 
@@ -435,7 +531,14 @@ class _LogsPageListState extends State<LogsPageList> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: GestureDetector(
-        onTap: () => _openSubtotalsPopup(pageIndex),
+        onTap: () => _openSubtotalsPopup(
+          pageIndex: pageIndex,
+          pageTime: pageTime,
+          previousTime: previousTime,
+          totalsTime: totalsTime,
+          pageFlightIds: pageFlightIds,
+          previousFlightIds: previousFlightIds,
+        ),
         behavior: HitTestBehavior.opaque,
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -530,28 +633,30 @@ class _LogsPageListState extends State<LogsPageList> {
     if (_flightsLocked) return;
     if (!_isSameDay(dragged.startDate, target.startDate)) return;
 
-    final draggedId = _asIntId(dragged.id);
-    final targetId = _asIntId(target.id);
-    if (draggedId == null || targetId == null) return;
-    if (draggedId == targetId) return;
+    final draggedKey = _flightKey(dragged);
+    final targetKey = _flightKey(target);
+    if (draggedKey == targetKey) return;
 
-    if (_lastPreviewDraggedId == draggedId &&
-        _lastPreviewTargetId == targetId) {
+    // evita reordenar mil veces sobre el mismo target
+    if (_lastPreviewDraggedId == draggedKey &&
+        _lastPreviewTargetId == targetKey) {
       return;
     }
-    _lastPreviewDraggedId = draggedId;
-    _lastPreviewTargetId = targetId;
+    _lastPreviewDraggedId = draggedKey;
+    _lastPreviewTargetId = targetKey;
 
     final day = dragged.startDate;
 
+    // lista del día en el orden actual visible (según _all)
     final dayFlights = _all.where((f) => _isSameDay(f.startDate, day)).toList();
-    final from = dayFlights.indexWhere((f) => _asIntId(f.id) == draggedId);
-    final to = dayFlights.indexWhere((f) => _asIntId(f.id) == targetId);
+    final from = dayFlights.indexWhere((f) => _flightKey(f) == draggedKey);
+    final to = dayFlights.indexWhere((f) => _flightKey(f) == targetKey);
     if (from < 0 || to < 0 || from == to) return;
 
     final moved = dayFlights.removeAt(from);
     dayFlights.insert(to, moved);
 
+    // actualiza sortIndex map SOLO para ese día (si existe id entero)
     final newSort = Map<int, int>.from(_sortIndexById);
     for (int i = 0; i < dayFlights.length; i++) {
       final id = _asIntId(dayFlights[i].id);
@@ -560,12 +665,12 @@ class _LogsPageListState extends State<LogsPageList> {
 
     setState(() {
       _sortIndexById = newSort;
-      _all = _computeOrdering(_all);
+      _all = _computeOrdering(_all); // reordena y recalcula orderNumber visible
     });
   }
 
   // === NUEVO: restaurar si se cancela el drag ===
-  void _restorePreviewIfNeeded() {
+  void restorePreviewIfNeeded() {
     final snap = _sortIndexSnapshot;
     if (snap == null) return;
 
@@ -579,36 +684,53 @@ class _LogsPageListState extends State<LogsPageList> {
     _lastPreviewTargetId = null;
   }
 
+  bool _mapsEqual(Map<int, int> a, Map<int, int> b) {
+    if (a.length != b.length) return false;
+    for (final e in a.entries) {
+      if (b[e.key] != e.value) return false;
+    }
+    return true;
+  }
+
+  Future<void> _commitPreviewOrRestore(DateTime day) async {
+    final snap = _sortIndexSnapshot;
+    if (snap == null) return;
+
+    // Si no hubo cambios durante el drag, restaura (no hacer nada visible)
+    if (_mapsEqual(snap, _sortIndexById)) {
+      _sortIndexSnapshot = null;
+      _lastPreviewDraggedId = null;
+      _lastPreviewTargetId = null;
+      return;
+    }
+
+    // Hubo preview-reorder pero el drop no se aceptó: conserva el orden actual y persiste.
+    final dayFlights = _all.where((f) => _isSameDay(f.startDate, day)).toList();
+    await _saveDaySortOrder(day, dayFlights);
+
+    _sortIndexSnapshot = null;
+    _lastPreviewDraggedId = null;
+    _lastPreviewTargetId = null;
+  }
+
   Widget _wrapReorderableItem(
       BuildContext context, LogbookFlight flight, Widget child) {
     if (_flightsLocked || _isFilterActive) return child;
-
-    String flightKey(LogbookFlight f) {
-      final intId = _asIntId(f.id);
-      if (intId != null) return 'id:$intId';
-
-      final s = f.id?.toString();
-      if (s != null && s.trim().isNotEmpty) return 'sid:${s.trim()}';
-
-      // fallback estable si id no existe
-      return 'ts:${f.startDate.millisecondsSinceEpoch}_${f.createdAt.millisecondsSinceEpoch}';
-    }
 
     return DragTarget<LogbookFlight>(
       onWillAccept: (dragged) {
         if (dragged == null) return false;
         if (_flightsLocked) return false;
         return _isSameDay(dragged.startDate, flight.startDate) &&
-            flightKey(dragged) != flightKey(flight);
+            _flightKey(dragged) != _flightKey(flight);
       },
 
-      // === NUEVO: preview mientras se mueve ===
+      // preview mientras se mueve
       onMove: (details) => _previewReorderWithinSameDay(details.data, flight),
       onAccept: (dragged) => _reorderWithinSameDay(dragged, flight),
       builder: (context, candidateData, rejectedData) {
         return LongPressDraggable<LogbookFlight>(
           data: flight,
-          // === NUEVO: snapshot para revertir si se cancela ===
           onDragStarted: () {
             _sortIndexSnapshot = Map<int, int>.from(_sortIndexById);
             _lastPreviewDraggedId = null;
@@ -619,8 +741,9 @@ class _LogsPageListState extends State<LogsPageList> {
             _lastPreviewDraggedId = null;
             _lastPreviewTargetId = null;
           },
-          onDraggableCanceled: (_, __) {
-            _restorePreviewIfNeeded();
+          onDraggableCanceled: (_, __) async {
+            // Si el drop no se “acepta” (por soltar entre items), conserva el último preview y persiste.
+            await _commitPreviewOrRestore(flight.startDate);
           },
           feedback: Material(
             color: Colors.transparent,
@@ -631,7 +754,7 @@ class _LogsPageListState extends State<LogsPageList> {
               child: child,
             ),
           ),
-          // === CAMBIO: no dejar “hueco invisible” durante drag (mejora percepción de desplazamiento) ===
+          // deja hueco real durante drag
           childWhenDragging: Opacity(opacity: 0.0, child: child),
           child: child,
         );
@@ -645,6 +768,9 @@ class _LogsPageListState extends State<LogsPageList> {
     _filterRegCtrl.dispose();
     _filterIdCtrl.dispose();
     _filterPicCtrl.dispose();
+    _scrollCtrl.removeListener(_scheduleStickyYearUpdate);
+    _scrollCtrl.dispose();
+
     super.dispose();
   }
 
@@ -657,17 +783,42 @@ class _LogsPageListState extends State<LogsPageList> {
     return '$hh:$mm';
   }
 
-  static LogbookFlight _fromRow(Map<String, Object?> row) {
+  static LogbookFlight _fromRowWithLookups(
+    AppLocalizations l,
+    Map<String, Object?> row, {
+    required Map<String, String> flagByPrefix,
+    required Map<int, String> aircraftRegById,
+    required Map<int, String> aircraftIdentById,
+    required Map<int, bool> aircraftIsSimById,
+  }) {
     final startMs = row['startDate'] as int? ?? 0;
     final endMs = row['endDate'] as int?;
     final createdMs = row['createdAt'] as int? ?? startMs;
 
-    final fromIcao = (row['fromIcao'] as String?)?.trim() ?? '';
-    final fromFlag = (row['fromFlagEmoji'] as String?)?.trim() ?? '';
+    final fromIcao = (row['fromIcao'] as String?)?.trim().toUpperCase() ?? '';
+    final toIcao = (row['toIcao'] as String?)?.trim().toUpperCase() ?? '';
 
-    final reg = (row['aircraftRegistration'] as String?)?.trim() ?? '';
-    final ident = (row['aircraftIdentifier'] as String?)?.trim() ?? '';
-    final pic = (row['pic'] as String?)?.trim() ?? '';
+    final int? aircraftItemId = row['aircraftItemId'] as int?;
+
+    // Detectar simulador aunque falte aircraftItemId (por ejemplo ICAO = "SIM")
+    final bool isSim = (fromIcao == 'SIM' || toIcao == 'SIM')
+        ? true
+        : (aircraftItemId != null &&
+            (aircraftIsSimById[aircraftItemId] ?? false));
+
+    final String fromFlag =
+        isSim ? '🕹️' : (flagByPrefix[_icaoPrefix2(fromIcao)] ?? '🏳️');
+
+    final String reg =
+        (aircraftItemId != null) ? (aircraftRegById[aircraftItemId] ?? '') : '';
+
+    final String ident = (aircraftItemId != null)
+        ? (aircraftIdentById[aircraftItemId] ?? '')
+        : '';
+
+    // Piloto (compat): en schema nuevo está en pilotName
+    final String pilotName = (row['pilotName'] as String?)?.trim() ?? '';
+    final String rango = (row['rangoPilot'] as String?)?.trim() ?? '';
 
     final bt = _formatBlockTime(
       text: row['blockTimeText'] as String?,
@@ -682,22 +833,143 @@ class _LogsPageListState extends State<LogsPageList> {
       blockTime: bt,
       fromIcao: fromIcao,
       fromFlagEmoji: fromFlag,
-      aircraftRegistration: reg,
-      aircraftIdentifier: ident,
-      pic: pic,
+      aircraftRegistration: isSim ? l.t('aircraft_type_simulator_title') : reg,
+      aircraftIdentifier: ident.isNotEmpty ? ident : reg,
+      pic: pilotName.isNotEmpty ? pilotName : rango,
       createdAt: DateTime.fromMillisecondsSinceEpoch(createdMs),
       orderNumber: '00', // se calcula después
     );
   }
 
-  Future<List<LogbookFlight>> _defaultLoader() async {
-    final rows = await DBHelper.getFlightsForLogsList();
-    return rows.map(_fromRow).toList();
+  static String _icaoPrefix2(String icao) {
+    final s = icao.trim().toUpperCase();
+    if (s.length < 2) return '';
+    return s.substring(0, 2);
   }
 
-  Future<void> _reload() async {
+  static Iterable<String> _splitPrefixes(String raw) sync* {
+    // Admite: "SC, SA", "SC SA", "SC|SA", "SC;SA"
+    final normalized = raw.replaceAll('|', ',').replaceAll(';', ',');
+    for (final part in normalized.split(',')) {
+      final p = part.trim();
+      if (p.isEmpty) continue;
+      // si viene "SC SA" en un solo campo
+      for (final sub in p.split(RegExp(r'\s+'))) {
+        final s = sub.trim();
+        if (s.isNotEmpty) yield s.toUpperCase();
+      }
+    }
+  }
+
+  Future<List<LogbookFlight>> _defaultLoader() async {
+    final rows = await DBHelper.getFlightsForLogsList();
+    if (rows.isEmpty) return const <LogbookFlight>[];
+
+    final db = await DBHelper.getDB();
+
+    // ---- Countries: prefix -> flagEmoji (para "Desde")
+    final Map<String, String> flagByPrefix = <String, String>{};
+    try {
+      final countryRows = await db.query(
+        DBHelper.tableCountries,
+        columns: const ['icaoPrefixes', 'flagEmoji'],
+      );
+      for (final r in countryRows) {
+        final prefixesRaw = (r['icaoPrefixes'] as String?)?.trim() ?? '';
+        final flag = (r['flagEmoji'] as String?)?.trim() ?? '';
+        if (prefixesRaw.isEmpty || flag.isEmpty) continue;
+
+        for (final p in _splitPrefixes(prefixesRaw)) {
+          if (p.length >= 2) {
+            flagByPrefix[p.substring(0, 2).toUpperCase()] = flag;
+          }
+        }
+      }
+    } catch (_) {
+      // Si falla, no rompe la lista: se pintará bandera por defecto.
+    }
+
+    // ---- Aircraft items: id -> {registration, identifier, isSimulator}
+    final Set<int> aircraftIds = <int>{};
+    for (final row in rows) {
+      final aid = row['aircraftItemId'];
+      if (aid is int) aircraftIds.add(aid);
+    }
+
+    final Map<int, String> aircraftRegById = <int, String>{};
+    final Map<int, String> aircraftIdentById = <int, String>{};
+    final Map<int, bool> aircraftIsSimById = <int, bool>{};
+
+    if (aircraftIds.isNotEmpty) {
+      final ids = aircraftIds.toList(growable: false);
+      const chunkSize = 500; // SQLite var limit safety
+      for (int i = 0; i < ids.length; i += chunkSize) {
+        final end = (i + chunkSize) > ids.length ? ids.length : (i + chunkSize);
+        final chunk = ids.sublist(i, end);
+        final whereIn = List.filled(chunk.length, '?').join(',');
+        final aiRows = await db.query(
+          DBHelper.tableAircraftItems,
+          columns: const ['id', 'registration', 'identifier', 'isSimulator'],
+          where: 'id IN ($whereIn)',
+          whereArgs: chunk,
+        );
+        for (final r in aiRows) {
+          final id = r['id'];
+          if (id is! int) continue;
+          aircraftRegById[id] = (r['registration'] as String?)?.trim() ?? '';
+          aircraftIdentById[id] = (r['identifier'] as String?)?.trim() ?? '';
+          final isSim = (r['isSimulator'] as int?) == 1;
+          aircraftIsSimById[id] = isSim;
+        }
+      }
+    }
+
+    final l = AppLocalizations.of(context);
+    return rows
+        .map((row) => _fromRowWithLookups(
+              l,
+              row,
+              flagByPrefix: flagByPrefix,
+              aircraftRegById: aircraftRegById,
+              aircraftIdentById: aircraftIdentById,
+              aircraftIsSimById: aircraftIsSimById,
+            ))
+        .toList();
+  }
+
+  List<int> _extractIntIds(List<dynamic> flights) {
+    final out = <int>[];
+
+    for (final f in flights) {
+      dynamic rawId;
+
+      // Caso: Map
+      if (f is Map) {
+        rawId = f['id'];
+      } else {
+        // Caso: modelo con .id
+        try {
+          rawId = (f as dynamic).id;
+        } catch (_) {
+          rawId = null;
+        }
+      }
+
+      if (rawId is int) {
+        out.add(rawId);
+      } else if (rawId is String) {
+        final n = int.tryParse(rawId);
+        if (n != null) out.add(n);
+      }
+    }
+
+    return out;
+  }
+
+  Future<void> _reload({bool scrollToBottom = false}) async {
     if (_loading) return;
     setState(() => _loading = true);
+    _scrollToBottomOnce();
 
     try {
       final loaded = await (widget.loader ?? _defaultLoader).call();
@@ -707,8 +979,30 @@ class _LogsPageListState extends State<LogsPageList> {
         _sortIndexById = sortMap;
         _all = _computeOrdering(loaded);
       });
+
+      if (!_didAutoScrollToBottom) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          if (_scrollCtrl.hasClients) {
+            _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
+          }
+          _didAutoScrollToBottom = true;
+        });
+      }
     } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() => _loading = false);
+        _scheduleInitialScrollToBottom();
+      }
+    }
+    if (scrollToBottom) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (_scrollCtrl.hasClients) {
+          _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
+        }
+        _updateStickyYearFromAnchors();
+      });
     }
   }
 
@@ -1152,6 +1446,12 @@ class _LogsPageListState extends State<LogsPageList> {
     final grouped = _groupByYear(filtered);
     final visible = filtered;
 
+    for (final year in grouped.keys) {
+      _yearAnchorKeys.putIfAbsent(year, () => GlobalKey());
+    }
+
+    _yearAnchorKeys.removeWhere((k, _) => !grouped.containsKey(k));
+
 // clave estable para mapear posición visible (id si existe; fallback si no)
     int flightKey(LogbookFlight f) =>
         _asIntId(f.id) ??
@@ -1171,7 +1471,9 @@ class _LogsPageListState extends State<LogsPageList> {
     for (int i = 0; i < times.length; i++) {
       prefix[i + 1] = prefix[i] + times[i];
     }
-
+    final stickyYearText = _stickyYearText.isNotEmpty
+        ? _stickyYearText
+        : (grouped.isNotEmpty ? grouped.keys.first.toString() : '');
     return WillPopScope(
       onWillPop: () async {
         final popped = await _popWithResult();
@@ -1187,262 +1489,336 @@ class _LogsPageListState extends State<LogsPageList> {
           },
         ),
         body: Stack(children: [
-          Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _searchCtrl,
-                        decoration: InputDecoration(
-                          labelText: l.t("search"),
-                          // ✅ el "título" pasa a ser "subtítulo" al enfocar/escribir (label flotante)
-                          floatingLabelBehavior: FloatingLabelBehavior.auto,
+          Column(children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _searchCtrl,
+                      decoration: InputDecoration(
+                        labelText: l.t("search"),
+                        // ✅ el "título" pasa a ser "subtítulo" al enfocar/escribir (label flotante)
+                        floatingLabelBehavior: FloatingLabelBehavior.auto,
 
-                          prefixIcon: const Icon(Icons.search),
+                        prefixIcon: const Icon(Icons.search),
 
-                          // ✅ borde 1px tipo "cuadro de texto"
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(
-                              width: 1,
-                              color: AppColors.teal4.withOpacity(0.70),
-                            ),
-                          ),
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(
-                              width: 1,
-                              color: AppColors.teal4.withOpacity(0.70),
-                            ),
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(
-                              width: 1,
-                              color: AppColors.teal4,
-                            ),
-                          ),
-
-                          isDense: true,
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 12,
-                          ),
-                        ),
-                        onChanged: (_) => setState(() {}),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    InkWell(
-                      onTap: _openFilters,
-                      borderRadius: BorderRadius.circular(12),
-                      child: Container(
-                        width: 46,
-                        height: 46,
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            colors: [AppColors.teal1, AppColors.teal2],
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
-                          ),
+                        // ✅ borde 1px tipo "cuadro de texto"
+                        border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(12),
-                        ),
-                        alignment: Alignment.center,
-                        child: const Icon(Icons.filter_alt_outlined,
-                            color: Colors.white),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    InkWell(
-                      onTap: () async {
-                        setState(() => _flightsLocked = !_flightsLocked);
-                        await _saveFlightsLockState();
-                      },
-                      borderRadius: BorderRadius.circular(12),
-                      child: Container(
-                        width: 46,
-                        height: 46,
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            colors: [AppColors.teal1, AppColors.teal2],
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
+                          borderSide: BorderSide(
+                            width: 1,
+                            color: AppColors.teal4.withOpacity(0.70),
                           ),
-                          borderRadius: BorderRadius.circular(12),
                         ),
-                        alignment: Alignment.center,
-                        child: Icon(
-                          _flightsLocked ? Icons.lock : Icons.lock_open,
-                          color: Colors.white,
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(
+                            width: 1,
+                            color: AppColors.teal4.withOpacity(0.70),
+                          ),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide(
+                            width: 1,
+                            color: AppColors.teal4,
+                          ),
+                        ),
+
+                        isDense: true,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 12,
                         ),
                       ),
+                      onChanged: (_) => setState(() {}),
                     ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(width: 10),
+                  InkWell(
+                    onTap: _openFilters,
+                    borderRadius: BorderRadius.circular(12),
+                    child: Container(
+                      width: 46,
+                      height: 46,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [AppColors.teal1, AppColors.teal2],
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                        ),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      alignment: Alignment.center,
+                      child: const Icon(Icons.filter_alt_outlined,
+                          color: Colors.white),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  InkWell(
+                    onTap: () async {
+                      setState(() => _flightsLocked = !_flightsLocked);
+                      await _saveFlightsLockState();
+                    },
+                    borderRadius: BorderRadius.circular(12),
+                    child: Container(
+                      width: 46,
+                      height: 46,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [AppColors.teal1, AppColors.teal2],
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                        ),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      alignment: Alignment.center,
+                      child: Icon(
+                        _flightsLocked ? Icons.lock : Icons.lock_open,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ],
               ),
-              Expanded(
-                child: _loading
-                    ? const Center(child: CircularProgressIndicator())
-                    : filtered.isEmpty
-                        ? Center(child: Text(l.t("no_results")))
-                        : Scrollbar(
-                            thumbVisibility: true,
-                            interactive: true,
-                            child: RefreshIndicator(
-                              onRefresh: _reload,
-                              child: CustomScrollView(
-                                slivers: [
-                                  for (final entry in grouped.entries) ...[
-                                    SliverPersistentHeader(
-                                      pinned: true,
-                                      delegate: _YearHeaderDelegate(
-                                        yearText: entry.key.toString(),
-                                      ),
-                                    ),
-                                    SliverList(
-                                      delegate: SliverChildBuilderDelegate(
-                                        (ctx, i) {
-                                          final f = entry.value[i];
-                                          final int pos =
-                                              indexByKey[flightKey(f)] ?? -1;
-                                          final bool showSubtotals =
-                                              !_isFilterActive &&
-                                                  pos >= 0 &&
-                                                  ((pos + 1) % 10 == 0);
-
-                                          final int pageIndex = showSubtotals
-                                              ? ((pos ~/ 10) + 1)
-                                              : 0;
-                                          final int pageStart = showSubtotals
-                                              ? ((pageIndex - 1) * 10)
-                                              : 0;
-                                          final int pageEnd = showSubtotals
-                                              ? (((pageStart + 10) <=
-                                                      visible.length)
-                                                  ? (pageStart + 10)
-                                                  : visible.length)
-                                              : 0;
-
-                                          final double pageTime = showSubtotals
-                                              ? (prefix[pageEnd] -
-                                                  prefix[pageStart])
-                                              : 0.0;
-                                          final double totalsTime =
-                                              showSubtotals
-                                                  ? (_baselineTotalsFlightTime +
-                                                      prefix[pageEnd])
-                                                  : 0.0;
-
-                                          final item = Padding(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 12,
-                                              vertical: 6,
+            ),
+            Expanded(
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : filtered.isEmpty
+                      ? Center(child: Text(l.t("no_results")))
+                      : Scrollbar(
+                          thumbVisibility: true,
+                          interactive: true,
+                          child: RefreshIndicator(
+                            onRefresh: _reload,
+                            child: Stack(
+                              children: [
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 34),
+                                  child: KeyedSubtree(
+                                    key: _yearsViewportKey,
+                                    child: CustomScrollView(
+                                      controller: _scrollCtrl,
+                                      slivers: [
+                                        for (final entry
+                                            in grouped.entries) ...[
+                                          SliverToBoxAdapter(
+                                            child: SizedBox(
+                                              key: _yearAnchorKeys[entry.key],
+                                              height: 0,
                                             ),
-                                            child: LogbookInfoButton(
-                                              orderNumber: f.orderNumber,
-                                              dateTitle: l.t("date"),
-                                              dateText: f.dayMonthText,
-                                              blockTitle: l.t("time"),
-                                              blockTimeText: f.blockTime,
-                                              fromTitle: l.t("flight_from"),
-                                              fromFlagEmoji: f.fromFlagEmoji,
-                                              fromIcao: f.fromIcao,
-                                              aircraftTitle: l.t("airplane"),
-                                              aircraftRegistration:
-                                                  f.aircraftRegistration,
+                                          ),
+                                          SliverList(
+                                            delegate:
+                                                SliverChildBuilderDelegate(
+                                              (ctx, i) {
+                                                final f = entry.value[i];
 
-                                              // Ajustes opcionales (si quieres activarlos aquí):
-                                              titleFontSize: 10,
-                                              valueFontSize: 12,
-                                              bigValueFontSize: 14,
-                                              orderFontSize: 14,
-                                              flagFontSize: 11,
-                                              aircraftFontSize: 12,
+                                                final int pos =
+                                                    indexByKey[flightKey(f)] ??
+                                                        -1;
+                                                final bool showSubtotals =
+                                                    !_isFilterActive &&
+                                                        pos >= 0 &&
+                                                        ((pos + 1) % 10 == 0);
 
-                                              onTap: () async {
-                                                if (_flightsLocked) return;
-                                                final Object? rawId = f.id;
+                                                final int pageIndex =
+                                                    showSubtotals
+                                                        ? ((pos ~/ 10) + 1)
+                                                        : 0;
+                                                final int pageStart =
+                                                    showSubtotals
+                                                        ? ((pageIndex - 1) * 10)
+                                                        : 0;
+                                                final int pageEnd =
+                                                    showSubtotals
+                                                        ? (((pageStart + 10) <=
+                                                                visible.length)
+                                                            ? (pageStart + 10)
+                                                            : visible.length)
+                                                        : 0;
 
-                                                final int? flightId = rawId
-                                                        is int
-                                                    ? rawId
-                                                    : (rawId is num
-                                                        ? rawId.toInt()
-                                                        : int.tryParse(
-                                                            rawId?.toString() ??
-                                                                ''));
+                                                final List<int> pageFlightIds =
+                                                    showSubtotals
+                                                        ? _extractIntIds(
+                                                            visible.sublist(
+                                                                pageStart,
+                                                                pageEnd))
+                                                        : const <int>[];
 
-                                                if (flightId == null) {
-                                                  ScaffoldMessenger.of(context)
-                                                      .showSnackBar(
-                                                    SnackBar(
-                                                      content: Text(
-                                                          '${l.t("error")}: id inválido'),
-                                                    ),
-                                                  );
+                                                final List<int>
+                                                    previousFlightIds =
+                                                    showSubtotals
+                                                        ? _extractIntIds(
+                                                            visible.sublist(
+                                                                0, pageStart))
+                                                        : const <int>[];
 
-                                                  return;
-                                                }
+                                                final double pageTime =
+                                                    showSubtotals
+                                                        ? (prefix[pageEnd] -
+                                                            prefix[pageStart])
+                                                        : 0.0;
 
-                                                final bool? changed =
-                                                    await Navigator.push<bool>(
-                                                  context,
-                                                  MaterialPageRoute(
-                                                    builder: (_) =>
-                                                        NewFlightPage(
-                                                            flightId: flightId),
+                                                final double totalsTime =
+                                                    showSubtotals
+                                                        ? (_baselineTotalsFlightTime +
+                                                            prefix[pageEnd])
+                                                        : 0.0;
+
+                                                // Página anterior = TOTAL acumulado antes de esta página
+                                                final double previousTime =
+                                                    showSubtotals
+                                                        ? (totalsTime -
+                                                            pageTime)
+                                                        : 0.0;
+
+                                                final item = Padding(
+                                                  padding: const EdgeInsets
+                                                      .symmetric(
+                                                    horizontal: 12,
+                                                    vertical: 6,
+                                                  ),
+                                                  child: LogbookInfoButton(
+                                                    orderNumber: f.orderNumber,
+                                                    dateTitle: l.t("date"),
+                                                    dateText: f.dayMonthText,
+                                                    blockTitle: l.t("time"),
+                                                    blockTimeText: f.blockTime,
+                                                    fromTitle:
+                                                        l.t("flight_from"),
+                                                    fromFlagEmoji:
+                                                        f.fromFlagEmoji,
+                                                    fromIcao: f.fromIcao,
+                                                    aircraftTitle:
+                                                        l.t("airplane"),
+                                                    aircraftRegistration:
+                                                        f.aircraftRegistration,
+                                                    titleFontSize: 10,
+                                                    valueFontSize: 12,
+                                                    bigValueFontSize: 14,
+                                                    orderFontSize: 14,
+                                                    flagFontSize: 11,
+                                                    aircraftFontSize: 12,
+                                                    onTap: () async {
+                                                      if (_flightsLocked) {
+                                                        return;
+                                                      }
+
+                                                      final Object? rawId =
+                                                          f.id;
+                                                      final int? flightId = rawId
+                                                              is int
+                                                          ? rawId
+                                                          : (rawId is num
+                                                              ? rawId.toInt()
+                                                              : int.tryParse(
+                                                                  rawId?.toString() ??
+                                                                      ''));
+
+                                                      if (flightId == null) {
+                                                        return;
+                                                      }
+
+                                                      final bool? changed =
+                                                          await Navigator.push<
+                                                              bool>(
+                                                        context,
+                                                        MaterialPageRoute(
+                                                          builder: (_) =>
+                                                              NewFlightPage(
+                                                                  flightId:
+                                                                      flightId),
+                                                        ),
+                                                      );
+
+                                                      if (changed == true) {
+                                                        await _reload(
+                                                            scrollToBottom:
+                                                                true);
+                                                      }
+                                                    },
                                                   ),
                                                 );
 
-                                                if (changed == true) {
-                                                  await _reload();
-                                                }
-                                              },
-                                            ),
-                                          );
-                                          final Widget itemWithSubtotal =
-                                              Column(
-                                            children: [
-                                              item,
-                                              if (showSubtotals)
-                                                _buildSubtotalsSeparator(
-                                                  l: l,
-                                                  pageIndex: pageIndex,
-                                                  pageTime: pageTime,
-                                                  totalsTime: totalsTime,
-                                                ),
-                                            ],
-                                          );
+                                                final Widget itemWithSubtotal =
+                                                    Column(
+                                                  children: [
+                                                    item,
+                                                    if (showSubtotals)
+                                                      _buildSubtotalsSeparator(
+                                                        l: l,
+                                                        pageIndex: pageIndex,
+                                                        pageTime: pageTime,
+                                                        previousTime:
+                                                            previousTime,
+                                                        totalsTime: totalsTime,
+                                                        pageFlightIds:
+                                                            pageFlightIds,
+                                                        previousFlightIds:
+                                                            previousFlightIds,
+                                                      ),
+                                                  ],
+                                                );
 
-                                          final idStr = (f.id ??
-                                                  f.startDate
-                                                      .millisecondsSinceEpoch)
-                                              .toString();
-                                          return KeyedSubtree(
-                                            key: ValueKey('flight_$idStr'),
-                                            child: _wrapReorderableItem(
-                                                context, f, itemWithSubtotal),
-                                          );
-                                        },
-                                        childCount: entry.value.length,
+                                                final idStr = (f.id ??
+                                                        f.startDate
+                                                            .millisecondsSinceEpoch)
+                                                    .toString();
+                                                return KeyedSubtree(
+                                                  key:
+                                                      ValueKey('flight_$idStr'),
+                                                  child: _wrapReorderableItem(
+                                                      context,
+                                                      f,
+                                                      itemWithSubtotal),
+                                                );
+                                              },
+                                              childCount: entry.value.length,
+                                            ),
+                                          ),
+                                          const SliverToBoxAdapter(
+                                              child: SizedBox(height: 8)),
+                                        ],
+                                        const SliverToBoxAdapter(
+                                            child: SizedBox(height: 90)),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+
+                                // Barra fija (solo 1)
+                                Positioned(
+                                  left: 0,
+                                  right: 0,
+                                  top: 0,
+                                  child: IgnorePointer(
+                                    child: Container(
+                                      height: 34,
+                                      color: AppColors.teal1.withOpacity(0.85),
+                                      alignment: Alignment.centerLeft,
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 12),
+                                      child: Text(
+                                        stickyYearText,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.w900,
+                                          fontSize: 14,
+                                        ),
                                       ),
                                     ),
-                                    const SliverToBoxAdapter(
-                                        child: SizedBox(height: 8)),
-                                  ],
-                                  const SliverToBoxAdapter(
-                                    child: SizedBox(height: 90),
                                   ),
-                                ],
-                              ),
+                                ),
+                              ],
                             ),
                           ),
-              ),
-            ],
-          ),
+                        ),
+            ),
+          ]),
           Positioned(
             right: 16,
             bottom: 16,
@@ -1461,46 +1837,21 @@ class _LogsPageListState extends State<LogsPageList> {
       ),
     );
   }
-}
 
-class _YearHeaderDelegate extends SliverPersistentHeaderDelegate {
-  final String yearText;
+  void _scheduleInitialScrollToBottom() {
+    if (_didAutoScrollToBottom) return;
+    if (_hasAnyFilter()) return;
+    if (_searchCtrl.text.trim().isNotEmpty) return;
 
-  _YearHeaderDelegate({required this.yearText});
-
-  @override
-  double get minExtent => 34;
-
-  @override
-  double get maxExtent => 34;
-
-  @override
-  Widget build(
-      BuildContext context, double shrinkOffset, bool overlapsContent) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      alignment: Alignment.centerLeft,
-      color: Theme.of(context).scaffoldBackgroundColor,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(
-          color: AppColors.teal5.withOpacity(0.25),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: AppColors.teal4, width: 1),
-        ),
-        child: Text(
-          yearText,
-          style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                fontWeight: FontWeight.w700,
-              ),
-        ),
-      ),
-    );
-  }
-
-  @override
-  bool shouldRebuild(covariant _YearHeaderDelegate oldDelegate) {
-    return oldDelegate.yearText != yearText;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (!_scrollCtrl.hasClients) {
+        _scheduleInitialScrollToBottom();
+        return;
+      }
+      _scrollCtrl.jumpTo(_scrollCtrl.position.maxScrollExtent);
+      _didAutoScrollToBottom = true;
+    });
   }
 }
 
@@ -1561,7 +1912,7 @@ class LogbookInfoButton extends StatelessWidget {
             fontWeight: FontWeight.w600,
           ),
       TextStyle(
-        color: Colors.white.withOpacity(0.85),
+        color: AppColors.white.withOpacity(0.85),
         fontWeight: FontWeight.w600,
         fontSize: titleFontSize ?? 11,
       ),

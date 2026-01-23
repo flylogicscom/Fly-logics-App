@@ -734,15 +734,15 @@ class _TotalsPageState extends State<TotalsPage> {
                         title: l.t("totals_flight_conditions_section"),
                       ),
                       _decimalRow(
-                        l.t("totals_conditions_day"),
+                        l.t("totals_condition_day"),
                         _condDayCtrl,
                       ),
                       _decimalRow(
-                        l.t("totals_conditions_night"),
+                        l.t("totals_condition_night"),
                         _condNightCtrl,
                       ),
                       _decimalRow(
-                        l.t("totals_conditions_ifr"),
+                        l.t("totals_condition_ifr"),
                         _condIfrCtrl,
                       ),
 

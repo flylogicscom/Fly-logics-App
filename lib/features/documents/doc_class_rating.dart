@@ -13,7 +13,7 @@ import 'package:fly_logicd_logbook_app/utils/db_helper.dart';
 import 'package:fly_logicd_logbook_app/utils/country_data.dart' as cdata;
 
 class DocClassRatings extends StatefulWidget {
-  final int? ratingId; // null = nuevo, no null = editar
+  final int? ratingId; // null = nuevo, >0 = editar (0 se trata como nuevo)
 
   const DocClassRatings({super.key, this.ratingId});
 
@@ -24,27 +24,26 @@ class DocClassRatings extends StatefulWidget {
 class _DocClassRatingsState extends State<DocClassRatings> {
   static const String _classRatingsTable = 'class_ratings';
 
+  // Nombre en la licencia (prefill desde PilotData)
+  final _pilotNameCtrl = TextEditingController();
+
   // Habilitación de clase
-  final _classCodeCtrl =
-      TextEditingController(); // class_rating_code (uppercase)
-  final _classTitleCtrl =
-      TextEditingController(); // class_rating_title (Title Case words)
+  final _classCodeCtrl = TextEditingController(); // uppercase
+  final _classTitleCtrl = TextEditingController(); // Title Case words
 
   // Número
-  final _numberCtrl = TextEditingController(); // number (uppercase)
+  final _numberCtrl = TextEditingController(); // uppercase
 
   // País / autoridad
-  final _countryCtrl = TextEditingController(); // country (no auto)
-  final _authorityCodeCtrl = TextEditingController(); // authority (no auto)
-  final _authorityNameCtrl =
-      TextEditingController(); // authority_name (no auto)
+  final _countryCtrl = TextEditingController();
+  final _authorityCodeCtrl = TextEditingController();
+  final _authorityNameCtrl = TextEditingController();
   cdata.CountryData? _selectedCountry;
   String? _countryFlag;
 
   // Categoría / tipo de aeronave
-  final _categoryCtrl = TextEditingController(); // category (uppercase)
-  final _aircraftTypeCtrl =
-      TextEditingController(); // aircraft_type (Title Case words)
+  final _categoryCtrl = TextEditingController(); // uppercase
+  final _aircraftTypeCtrl = TextEditingController(); // Title Case words
 
   // Fechas
   final _issueDateCtrl = TextEditingController();
@@ -52,9 +51,8 @@ class _DocClassRatingsState extends State<DocClassRatings> {
   DateTime? _issueDate;
   DateTime? _expiryDate;
 
-  // Observaciones
-  final _observationsCtrl =
-      TextEditingController(); // observations (capitalize first letter)
+  // Observaciones: primera letra y después de cada punto en mayúscula
+  final _observationsCtrl = TextEditingController();
 
   bool _loading = true;
   bool _saving = false;
@@ -65,6 +63,8 @@ class _DocClassRatingsState extends State<DocClassRatings> {
   static final RegExp _wordRe =
       RegExp(r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:[’'\-][A-Za-zÀ-ÖØ-öø-ÿ]+)*");
   static final RegExp _letterRe = RegExp(r"[A-Za-zÀ-ÖØ-öø-ÿ]");
+
+  bool get _isEdit => (widget.ratingId ?? 0) > 0;
 
   int _clampSel(int v, int len) {
     if (v < 0) return 0;
@@ -131,8 +131,7 @@ class _DocClassRatingsState extends State<DocClassRatings> {
     return sb.toString();
   }
 
-  /// Primera letra de cada palabra en mayúscula (Title Case).
-  /// Preserva acrónimos cortos tipo IFR/VFR/ICAO.
+  /// Title Case por palabras, preserva acrónimos cortos (IFR/VFR/ICAO).
   String _toTitleCaseWordsPreservingAcronyms(String input) {
     return input.replaceAllMapped(_wordRe, (m) {
       final w = m.group(0) ?? '';
@@ -141,46 +140,51 @@ class _DocClassRatingsState extends State<DocClassRatings> {
     });
   }
 
-  /// Primera letra del texto (primera palabra) en mayúscula.
-  String _capitalizeFirst(String s) {
+  /// Regla: primera letra en mayúscula y después de cada punto (.), !, ? o salto de línea.
+  /// No fuerza minúsculas en el resto (solo “sube” mayúsculas cuando toca).
+  String _capitalizeSentences(String s) {
     if (s.isEmpty) return s;
 
     final chars = s.split('');
-    bool done = false;
+    bool capNext = true;
 
     for (int i = 0; i < chars.length; i++) {
       final ch = chars[i];
-      if (!done && _letterRe.hasMatch(ch)) {
-        chars[i] = ch.toUpperCase();
-        done = true;
-        break;
+
+      if (_letterRe.hasMatch(ch)) {
+        if (capNext) {
+          chars[i] = ch.toUpperCase();
+          capNext = false;
+        }
+        continue;
+      }
+
+      if (ch == '.' || ch == '!' || ch == '?' || ch == '\n') {
+        capNext = true;
       }
     }
+
     return chars.join();
   }
 
   void _setupAutoFormat() {
-    // class_rating_code: mayúscula todo
-    _attachFormattedController(_classCodeCtrl, _upperAll);
+    _attachFormattedController(
+      _pilotNameCtrl,
+      _toTitleCaseWordsPreservingAcronyms,
+    );
 
-    // class_rating_title: primera letra de cada palabra en mayúscula
+    _attachFormattedController(_classCodeCtrl, _upperAll);
     _attachFormattedController(
         _classTitleCtrl, _toTitleCaseWordsPreservingAcronyms);
-
-    // number: mayúscula todo
     _attachFormattedController(_numberCtrl, _upperAll);
-
-    // category: mayúscula todo
     _attachFormattedController(_categoryCtrl, _upperAll);
-
-    // aircraft_type: primera letra de cada palabra en mayúscula
     _attachFormattedController(
-        _aircraftTypeCtrl, _toTitleCaseWordsPreservingAcronyms);
+      _aircraftTypeCtrl,
+      _toTitleCaseWordsPreservingAcronyms,
+    );
 
-    // observations: primera letra del texto en mayúscula
-    _attachFormattedController(_observationsCtrl, _capitalizeFirst);
-
-    // country / authority / authority_name: nada automático
+    // Observations: capitalización por frases (punto -> mayúscula)
+    _attachFormattedController(_observationsCtrl, _capitalizeSentences);
   }
 
   @override
@@ -192,6 +196,7 @@ class _DocClassRatingsState extends State<DocClassRatings> {
 
   @override
   void dispose() {
+    _pilotNameCtrl.dispose();
     _classCodeCtrl.dispose();
     _classTitleCtrl.dispose();
     _numberCtrl.dispose();
@@ -208,11 +213,27 @@ class _DocClassRatingsState extends State<DocClassRatings> {
 
   Future<void> _init() async {
     await _ensureClassRatingsTableExists();
-    if (widget.ratingId != null) {
+
+    if (_isEdit) {
       await _loadClassRating();
+      // Fallback: si el registro viejo no tiene pilotName guardado
+      await _prefillPilotNameIfEmpty();
+    } else {
+      await _prefillPilotNameIfEmpty();
     }
-    if (mounted) {
-      setState(() => _loading = false);
+
+    if (mounted) setState(() => _loading = false);
+  }
+
+  Future<void> _prefillPilotNameIfEmpty() async {
+    if (_pilotNameCtrl.text.trim().isNotEmpty) return;
+
+    // Usa tu método (lo “correcto” para no duplicar lógica)
+    final name = await DBHelper.getPilotDisplayName();
+    if (!mounted) return;
+
+    if (name != null && name.trim().isNotEmpty) {
+      _pilotNameCtrl.text = name.trim();
     }
   }
 
@@ -239,6 +260,9 @@ class _DocClassRatingsState extends State<DocClassRatings> {
             .execute('ALTER TABLE $_classRatingsTable ADD COLUMN $name $type');
       }
     }
+
+    // Nombre titular en licencia
+    await addColumn('pilotName', 'TEXT');
 
     await addColumn('classCode', 'TEXT');
     await addColumn('classTitle', 'TEXT');
@@ -267,6 +291,8 @@ class _DocClassRatingsState extends State<DocClassRatings> {
     if (rows.isEmpty) return;
     final r = rows.first;
 
+    _pilotNameCtrl.text = (r['pilotName'] as String? ?? '').trim();
+
     _classCodeCtrl.text = (r['classCode'] as String? ?? '').trim();
     _classTitleCtrl.text = (r['classTitle'] as String? ?? '').trim();
     _numberCtrl.text = (r['number'] as String? ?? '').trim();
@@ -275,18 +301,20 @@ class _DocClassRatingsState extends State<DocClassRatings> {
 
     final issueStr = (r['issueDate'] as String? ?? '').trim();
     if (issueStr.isNotEmpty) {
-      try {
-        _issueDate = DateTime.parse(issueStr);
-        _issueDateCtrl.text = _formatDate(_issueDate!);
-      } catch (_) {}
+      final parsed = DateTime.tryParse(issueStr);
+      if (parsed != null) {
+        _issueDate = parsed;
+        _issueDateCtrl.text = _formatDate(parsed);
+      }
     }
 
     final expiryStr = (r['expiryDate'] as String? ?? '').trim();
     if (expiryStr.isNotEmpty) {
-      try {
-        _expiryDate = DateTime.parse(expiryStr);
-        _expiryDateCtrl.text = _formatDate(_expiryDate!);
-      } catch (_) {}
+      final parsed = DateTime.tryParse(expiryStr);
+      if (parsed != null) {
+        _expiryDate = parsed;
+        _expiryDateCtrl.text = _formatDate(parsed);
+      }
     }
 
     final countryName = (r['country'] as String? ?? '').trim();
@@ -345,6 +373,7 @@ class _DocClassRatingsState extends State<DocClassRatings> {
       firstDate: first,
       lastDate: last,
     );
+
     if (picked != null) {
       setState(() {
         _issueDate = picked;
@@ -365,6 +394,7 @@ class _DocClassRatingsState extends State<DocClassRatings> {
       firstDate: first,
       lastDate: last,
     );
+
     if (picked != null) {
       setState(() {
         _expiryDate = picked;
@@ -412,10 +442,14 @@ class _DocClassRatingsState extends State<DocClassRatings> {
                     itemBuilder: (ctx, i) {
                       final c = filtered[i];
                       return ListTile(
-                        leading: Text(c.flagEmoji,
-                            style: Theme.of(context).textTheme.titleLarge),
-                        title: Text(c.name,
-                            style: Theme.of(context).textTheme.titleMedium),
+                        leading: Text(
+                          c.flagEmoji,
+                          style: Theme.of(context).textTheme.titleLarge,
+                        ),
+                        title: Text(
+                          c.name,
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
                         onTap: () {
                           selected = c;
                           Navigator.pop(context);
@@ -474,6 +508,7 @@ class _DocClassRatingsState extends State<DocClassRatings> {
       }
 
       final data = <String, Object?>{
+        'pilotName': _nullIfEmpty(_pilotNameCtrl.text),
         'classCode': _nullIfEmpty(_classCodeCtrl.text),
         'classTitle': _nullIfEmpty(_classTitleCtrl.text),
         'number': _nullIfEmpty(_numberCtrl.text),
@@ -488,7 +523,7 @@ class _DocClassRatingsState extends State<DocClassRatings> {
         'observations': _nullIfEmpty(_observationsCtrl.text),
       };
 
-      if (widget.ratingId == null) {
+      if (!_isEdit) {
         data['createdAt'] = DateTime.now().toIso8601String();
         await db.insert(_classRatingsTable, data);
       } else {
@@ -518,7 +553,7 @@ class _DocClassRatingsState extends State<DocClassRatings> {
   }
 
   Future<void> _deleteClassRating() async {
-    if (widget.ratingId == null) return;
+    if (!_isEdit) return;
 
     try {
       final db = await DBHelper.getDB();
@@ -564,7 +599,16 @@ class _DocClassRatingsState extends State<DocClassRatings> {
           l.t("class_rating_header"),
           style: AppTextStyles.subtitle.copyWith(fontWeight: FontWeight.w600),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 12),
+
+        // Nombre (prefill desde PilotData)
+        TextField(
+          controller: _pilotNameCtrl,
+          textCapitalization: TextCapitalization.words,
+          decoration: _fieldDecoration(context, "name_lastname"),
+        ),
+        const SizedBox(height: 12),
+
         Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -677,9 +721,8 @@ class _DocClassRatingsState extends State<DocClassRatings> {
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context);
 
-    final String title = widget.ratingId == null
-        ? l.t("new_class_rating")
-        : l.t("edit_class_rating");
+    final String title =
+        !_isEdit ? l.t("new_class_rating") : l.t("edit_class_rating");
 
     return BaseScaffold(
       appBar: CustomAppBar(
@@ -709,10 +752,8 @@ class _DocClassRatingsState extends State<DocClassRatings> {
                     onSave: () async {
                       if (!_saving) await _saveClassRating();
                     },
-                    deleteLabel: widget.ratingId != null ? l.t("delete") : null,
-                    onDelete: widget.ratingId != null
-                        ? () async => _deleteClassRating()
-                        : null,
+                    deleteLabel: _isEdit ? l.t("delete") : null,
+                    onDelete: _isEdit ? () async => _deleteClassRating() : null,
                   ),
                   const SizedBox(height: 12),
                 ],

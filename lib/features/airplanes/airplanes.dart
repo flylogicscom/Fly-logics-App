@@ -1,6 +1,7 @@
 // lib/features/aircraft/airplanes.dart
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'package:fly_logicd_logbook_app/common/base_scaffold.dart';
 import 'package:fly_logicd_logbook_app/common/custom_app_bar.dart';
@@ -388,12 +389,6 @@ class _AirplanesState extends State<Airplanes> {
   }
 
   /// Busca el país por prefijo de matrícula usando CountryData.registration.
-  ///
-  /// - Se hace búsqueda por prefijo que empieza el registro.
-  /// - Soporta prefijos con y sin guion:
-  ///   - Si en la DB está `CC-` y el usuario escribe `CCABC` ⇒ coincide.
-  ///   - Si en la DB está `CC-` y el usuario escribe `CC-ABC` ⇒ coincide.
-  /// - En caso de conflicto se elige el prefijo más largo (más específico).
   cdata.CountryData? _findCountryByRegistration(String registration) {
     final input = registration.toUpperCase().trim();
     if (input.isEmpty) return null;
@@ -504,23 +499,8 @@ class _AirplanesState extends State<Airplanes> {
     });
   }
 
-  /// La matrícula propone el país según reglas + CountryData.registration:
-  /// - N...  => USA siempre.
-  /// - B- + letra => China.
-  /// - B- + número => Taiwan.
-  /// - Resto: no se busca hasta que haya un guion.
-  ///   * Excepto VP-, VQ-: se espera al siguiente carácter (ej. VP-B...).
   void _onRegistrationChanged(String value) {
-    // Forzar texto en el campo a MAYÚSCULAS
-    final upper = value.toUpperCase();
-    if (upper != value) {
-      _registrationCtrl.value = _registrationCtrl.value.copyWith(
-        text: upper,
-        selection: TextSelection.collapsed(offset: upper.length),
-      );
-    }
-
-    final reg = upper.trim();
+    final reg = value.toUpperCase().trim();
     if (reg.isEmpty) return;
 
     // Si ya hay país seleccionado o escrito, no tocamos nada
@@ -550,7 +530,6 @@ class _AirplanesState extends State<Airplanes> {
     // A partir de aquí, para el resto se exige que haya guion
     final hyphenIndex = reg.indexOf('-');
     if (hyphenIndex == -1) {
-      // Aún no se ha introducido guion ⇒ no buscamos
       return;
     }
 
@@ -689,6 +668,98 @@ class _AirplanesState extends State<Airplanes> {
     });
   }
 
+  // ================== CONFIRM POPUPS (FORMATO CREW) ==================
+
+  Future<void> _confirmDeleteAircraft() async {
+    if (widget.aircraftId == null) return;
+
+    final l = AppLocalizations.of(context);
+
+    await showPopWindow(
+      context: context,
+      title: l.t("delet_element"),
+      children: [
+        Text(
+          l.t("delet_element_question"),
+          style: AppTextStyles.body,
+        ),
+        const SizedBox(height: 16),
+        ButtonStyles.pillCancelSave(
+          onCancel: () => Navigator.pop(context),
+          onSave: () async {
+            Navigator.pop(context);
+            await _deleteAircraft();
+          },
+          cancelLabel: l.t("cancel"),
+          saveLabel: l.t("delete"),
+        ),
+      ],
+    );
+  }
+
+  bool _hasMissingFieldsExceptNotesTags() {
+    // Tipo (siempre cuenta)
+    if (_aircraftType == null || _aircraftType!.allCodes.isEmpty) return true;
+
+    if (_isSimulator) {
+      final simCompany = _simCompanyCtrl.text.trim();
+      final simModel = _simAircraftModelCtrl.text.trim();
+      final simLevel = _simLevelCtrl.text.trim();
+      final simSerial = _simSerialNumberCtrl.text.trim();
+
+      return simCompany.isEmpty ||
+          simModel.isEmpty ||
+          simLevel.isEmpty ||
+          simSerial.isEmpty;
+    } else {
+      final reg = _registrationCtrl.text.trim();
+      final country = _countryCtrl.text.trim();
+      final identifier = _identifierCtrl.text.trim();
+      final makeModel = _makeModelCtrl.text.trim();
+      final serial = _serialNumberCtrl.text.trim();
+      final owner = _ownerCtrl.text.trim();
+
+      return reg.isEmpty ||
+          country.isEmpty ||
+          identifier.isEmpty ||
+          makeModel.isEmpty ||
+          serial.isEmpty ||
+          owner.isEmpty;
+    }
+  }
+
+  Future<void> _saveAircraftFlow() async {
+    if (_saving) return;
+
+    final l = AppLocalizations.of(context);
+
+    if (_hasMissingFieldsExceptNotesTags()) {
+      await showPopWindow(
+        context: context,
+        title: l.t("save"),
+        children: [
+          Text(
+            l.t("save_missing_question"),
+            style: AppTextStyles.body,
+          ),
+          const SizedBox(height: 16),
+          ButtonStyles.pillCancelSave(
+            onCancel: () => Navigator.pop(context),
+            onSave: () async {
+              Navigator.pop(context);
+              await _saveAircraft();
+            },
+            cancelLabel: l.t("cancel"),
+            saveLabel: l.t("accept"),
+          ),
+        ],
+      );
+      return;
+    }
+
+    await _saveAircraft();
+  }
+
   // ================== GUARDAR / BORRAR ==================
 
   Future<void> _saveAircraft() async {
@@ -729,7 +800,7 @@ class _AirplanesState extends State<Airplanes> {
       final data = <String, Object?>{
         // Tipos
         'typeCode': sel?.code,
-        'typeTitle': sel?.allTitles.join('|'), // separador seguro
+        'typeTitle': sel?.allTitles.join('|'),
         'typeIds': ids.isEmpty ? null : ids.join(','),
         'isSimulator': isSim ? 1 : 0,
         'typeCustomLabel': sel != null && sel.isCustom ? sel.title : null,
@@ -752,6 +823,7 @@ class _AirplanesState extends State<Airplanes> {
         'simLevel': _nullIfEmpty(_simLevelCtrl.text),
         'simSerialNumber': _nullIfEmpty(_simSerialNumberCtrl.text),
 
+        // Observaciones / Tags (excluidos del chequeo de faltantes)
         'notes': _nullIfEmpty(_notesCtrl.text),
         'tags': _tags.isEmpty ? null : _tags.join(','),
       };
@@ -808,7 +880,7 @@ class _AirplanesState extends State<Airplanes> {
       if (!mounted) return;
       final l = AppLocalizations.of(context);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l.t("error_saving_data"))),
+        SnackBar(content: Text(l.t("error_deleting_data"))),
       );
     }
   }
@@ -872,8 +944,6 @@ class _AirplanesState extends State<Airplanes> {
       children: [
         SectionItemTitle(title: l.t("aircraft_section_type_title")),
         const SizedBox(height: 8),
-
-        // Sin selección: botón pill "add_type_aircraft"
         if (!hasSelection)
           Align(
             alignment: Alignment.centerLeft,
@@ -897,7 +967,6 @@ class _AirplanesState extends State<Airplanes> {
         else
           Row(
             children: [
-              // Etiquetas de colores con los tipos seleccionados
               Expanded(
                 child: Wrap(
                   spacing: 6,
@@ -934,7 +1003,6 @@ class _AirplanesState extends State<Airplanes> {
                 ),
               ),
               const SizedBox(width: 8),
-              // Botón cuadrado con esquinas redondas y símbolo +
               Material(
                 color: Colors.white.withOpacity(0.08),
                 borderRadius: BorderRadius.circular(8),
@@ -954,7 +1022,6 @@ class _AirplanesState extends State<Airplanes> {
               ),
             ],
           ),
-
         const SizedBox(height: 8),
         Text(
           _isSimulator
@@ -969,7 +1036,6 @@ class _AirplanesState extends State<Airplanes> {
     );
   }
 
-  // Datos de aeronave + observaciones + tags en la MISMA sección
   Widget _buildAircraftSection(BuildContext context) {
     if (_isSimulator) return const SizedBox.shrink();
 
@@ -982,17 +1048,18 @@ class _AirplanesState extends State<Airplanes> {
               AppLocalizations.of(context).t("aircraft_section_aircraft_title"),
         ),
         const SizedBox(height: 8),
-
-        // Matrícula / País
         Row(
           children: [
             Expanded(
               child: TextField(
                 controller: _registrationCtrl,
+                inputFormatters: const [UpperCaseTextFormatter()],
+                textCapitalization: TextCapitalization.characters,
                 onChanged: _onRegistrationChanged,
-                decoration: _fieldDecoration(
-                  context,
-                  "aircraft_registration_label",
+                decoration:
+                    _fieldDecoration(context, "aircraft_registration_label")
+                        .copyWith(
+                  hintText: '${l.t("hint")}: AA-AAA, N123AB',
                 ),
               ),
             ),
@@ -1014,69 +1081,48 @@ class _AirplanesState extends State<Airplanes> {
           ],
         ),
         const SizedBox(height: 12),
-
-        // Identificador
         TextField(
           controller: _identifierCtrl,
-          onChanged: (value) {
-            final upper = value.toUpperCase();
-            if (upper != value) {
-              _identifierCtrl.value = _identifierCtrl.value.copyWith(
-                text: upper,
-                selection: TextSelection.collapsed(offset: upper.length),
-              );
-            }
-          },
-          decoration: _fieldDecoration(
-            context,
-            "aircraft_identifier_label",
-          ).copyWith(
-            hintText: l.t("aircraft_identifier_hint"), // ej. "C-150"
+          inputFormatters: const [UpperCaseTextFormatter()],
+          textCapitalization: TextCapitalization.characters,
+          decoration:
+              _fieldDecoration(context, "aircraft_identifier_label").copyWith(
+            hintText: '${l.t("hint")}: C150, SR22',
           ),
         ),
         const SizedBox(height: 12),
-
-        // Marca y modelo
         TextField(
           controller: _makeModelCtrl,
-          // 1. ESTA ES LA CLAVE:
-          // El teclado se pondrá en mayúsculas automáticamente al inicio de cada palabra.
-          // Es el comportamiento "por defecto" que buscas.
+          inputFormatters: const [TitleCaseTextFormatter()],
           textCapitalization: TextCapitalization.words,
-
-          // 2. Deja el onChanged libre de transformaciones:
-          onChanged: (value) {
-            // Aquí puedes realizar otras acciones (como validaciones),
-            // pero NO modifiques el texto del controlador.
-          },
-
-          decoration: _fieldDecoration(
-            context,
-            "aircraft_make_model_label",
+          decoration:
+              _fieldDecoration(context, "aircraft_make_model_label").copyWith(
+            hintText: '${l.t("hint")}: Cessna 150 Commuter',
           ),
         ),
-
-        // Número de serie
+        const SizedBox(height: 12),
         TextField(
           controller: _serialNumberCtrl,
+          inputFormatters: const [UpperCaseTextFormatter()],
+          textCapitalization: TextCapitalization.characters,
           decoration: _fieldDecoration(
             context,
             "aircraft_serial_number_label",
           ),
         ),
         const SizedBox(height: 12),
-
-        // Propietario
         TextField(
           controller: _ownerCtrl,
+          inputFormatters: const [TitleCaseTextFormatter()],
+          textCapitalization: TextCapitalization.words,
           decoration: _fieldDecoration(
             context,
             "aircraft_owner_label",
+          ).copyWith(
+            hintText: '${l.t("hint")}: Latam',
           ),
         ),
         const SizedBox(height: 16),
-
-        // Observaciones + Tags
         _buildNotesTagsContent(context),
       ],
     );
@@ -1085,6 +1131,8 @@ class _AirplanesState extends State<Airplanes> {
   Widget _buildSimulatorSection(BuildContext context) {
     if (!_isSimulator) return const SizedBox.shrink();
 
+    final l = AppLocalizations.of(context);
+
     return SectionContainer(
       children: [
         SectionItemTitle(
@@ -1092,68 +1140,68 @@ class _AirplanesState extends State<Airplanes> {
               .t("aircraft_section_simulator_title"),
         ),
         const SizedBox(height: 8),
-
         TextField(
           controller: _simCompanyCtrl,
-          decoration: _fieldDecoration(
-            context,
-            "aircraft_sim_company_label",
+          inputFormatters: const [TitleCaseTextFormatter()],
+          textCapitalization: TextCapitalization.words,
+          decoration:
+              _fieldDecoration(context, "aircraft_sim_company_label").copyWith(
+            hintText: '${l.t("hint")}: Latam',
           ),
         ),
         const SizedBox(height: 12),
-
         TextField(
           controller: _simAircraftModelCtrl,
-          decoration: _fieldDecoration(
-            context,
-            "aircraft_sim_model_label",
+          inputFormatters: const [TitleCaseTextFormatter()],
+          textCapitalization: TextCapitalization.words,
+          decoration:
+              _fieldDecoration(context, "aircraft_sim_model_label").copyWith(
+            hintText: '${l.t("hint")}: Cessna 150 Commuter',
           ),
         ),
         const SizedBox(height: 12),
-
         TextField(
           controller: _simLevelCtrl,
-          decoration: _fieldDecoration(
-            context,
-            "aircraft_sim_level_label",
+          inputFormatters: const [UpperCaseTextFormatter()],
+          textCapitalization: TextCapitalization.characters,
+          decoration:
+              _fieldDecoration(context, "aircraft_sim_level_label").copyWith(
+            hintText: '${l.t("hint")}: LEVEL 1',
           ),
         ),
         const SizedBox(height: 12),
-
         TextField(
           controller: _simSerialNumberCtrl,
-          decoration: _fieldDecoration(
-            context,
-            "aircraft_sim_serial_label",
+          inputFormatters: const [UpperCaseTextFormatter()],
+          textCapitalization: TextCapitalization.characters,
+          decoration:
+              _fieldDecoration(context, "aircraft_sim_serial_label").copyWith(
+            hintText: '${l.t("hint")}: 150-15DD',
           ),
         ),
         const SizedBox(height: 16),
-
-        // Observaciones + Tags en la misma sección del simulador
         _buildNotesTagsContent(context),
       ],
     );
   }
 
-  // Contenido de observaciones + tags reutilizable
   Widget _buildNotesTagsContent(BuildContext context) {
     final l = AppLocalizations.of(context);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Observaciones
         TextField(
           controller: _notesCtrl,
           maxLines: 3,
+          inputFormatters: const [FirstLetterUppercaseFormatter()],
+          textCapitalization: TextCapitalization.sentences,
           decoration: _fieldDecoration(
             context,
             "aircraft_notes_label",
           ),
         ),
         const SizedBox(height: 12),
-
-        // Tags
         Text(
           l.t("aircraft_tags_label"),
           style: AppTextStyles.subtitle.copyWith(
@@ -1197,18 +1245,11 @@ class _AirplanesState extends State<Airplanes> {
         const SizedBox(height: 8),
         TextField(
           controller: _tagInputCtrl,
+          inputFormatters: const [UpperCaseTextFormatter()],
+          textCapitalization: TextCapitalization.characters,
           decoration: InputDecoration(
             hintText: l.t("aircraft_tags_hint"),
           ),
-          onChanged: (value) {
-            final upper = value.toUpperCase();
-            if (upper != value) {
-              _tagInputCtrl.value = _tagInputCtrl.value.copyWith(
-                text: upper,
-                selection: TextSelection.collapsed(offset: upper.length),
-              );
-            }
-          },
           onSubmitted: _addTagFromInput,
         ),
       ],
@@ -1258,14 +1299,14 @@ class _AirplanesState extends State<Airplanes> {
                     },
                     onSave: () async {
                       if (!_saving) {
-                        await _saveAircraft();
+                        await _saveAircraftFlow();
                       }
                     },
                     deleteLabel:
                         widget.aircraftId != null ? l.t("delete") : null,
                     onDelete: widget.aircraftId != null
                         ? () async {
-                            await _deleteAircraft();
+                            await _confirmDeleteAircraft();
                           }
                         : null,
                   ),
@@ -1273,6 +1314,106 @@ class _AirplanesState extends State<Airplanes> {
                 ],
               ),
             ),
+    );
+  }
+}
+
+/// ================== INPUT FORMATTERS ==================
+
+bool _isWordBoundary(String ch) {
+  return ch.trim().isEmpty || ch == '-' || ch == '_' || ch == '/' || ch == '.';
+}
+
+String _toTitleCasePreserve(String input) {
+  if (input.isEmpty) return input;
+
+  final sb = StringBuffer();
+  var newWord = true;
+
+  for (final r in input.runes) {
+    final ch = String.fromCharCode(r);
+
+    if (_isWordBoundary(ch)) {
+      newWord = true;
+      sb.write(ch);
+      continue;
+    }
+
+    if (newWord) {
+      sb.write(ch.toUpperCase());
+      newWord = false;
+    } else {
+      sb.write(ch);
+    }
+  }
+
+  return sb.toString();
+}
+
+String _capitalizeFirstNonSpace(String input) {
+  if (input.isEmpty) return input;
+
+  final match = RegExp(r'\S').firstMatch(input);
+  if (match == null) return input;
+
+  final i = match.start;
+  final first = input[i].toUpperCase();
+  return input.substring(0, i) + first + input.substring(i + 1);
+}
+
+class UpperCaseTextFormatter extends TextInputFormatter {
+  const UpperCaseTextFormatter();
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final upper = newValue.text.toUpperCase();
+    if (upper == newValue.text) return newValue;
+
+    return newValue.copyWith(
+      text: upper,
+      selection: newValue.selection,
+      composing: newValue.composing,
+    );
+  }
+}
+
+class TitleCaseTextFormatter extends TextInputFormatter {
+  const TitleCaseTextFormatter();
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final t = _toTitleCasePreserve(newValue.text);
+    if (t == newValue.text) return newValue;
+
+    return newValue.copyWith(
+      text: t,
+      selection: newValue.selection,
+      composing: newValue.composing,
+    );
+  }
+}
+
+class FirstLetterUppercaseFormatter extends TextInputFormatter {
+  const FirstLetterUppercaseFormatter();
+
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    final t = _capitalizeFirstNonSpace(newValue.text);
+    if (t == newValue.text) return newValue;
+
+    return newValue.copyWith(
+      text: t,
+      selection: newValue.selection,
+      composing: newValue.composing,
     );
   }
 }

@@ -1,3 +1,5 @@
+//lib\features\profile\crew_data.dart
+
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
@@ -74,16 +76,28 @@ class _CrewDataState extends State<CrewData> {
           final String last = (r['lastName'] as String? ?? '').trim();
           final String full = ('$first $last').trim();
 
+          final String rank = (r['rank'] as String? ?? '').trim();
+          final String roleCode = _roleCodeFromRank(rank) ?? '';
+
           return {
             'id': id,
             'firstName': first,
             'lastName': last,
-            // Etiqueta del botón: Nombre + Apellido
+            'rank': rank,
+            'roleCode': roleCode,
             'fullName': full.isEmpty ? 'Crew Member' : full,
           };
         }));
       _loading = false;
     });
+  }
+
+  String? _roleCodeFromRank(String rankRaw) {
+    final raw = rankRaw.trim();
+    if (raw.isEmpty) return null;
+    final m = RegExp(r'^[A-Za-z]+').firstMatch(raw);
+    final code = (m?.group(0) ?? '').toUpperCase();
+    return code.isEmpty ? null : code;
   }
 
   Future<void> _deleteCrew(int id, int index) async {
@@ -195,8 +209,8 @@ class _CrewDataState extends State<CrewData> {
     Map<String, dynamic> member,
     int index,
   ) {
-    final String label =
-        member['fullName'] as String? ?? 'Crew Member'; // Nombre + Apellido
+    final String baseName = member['fullName'] as String? ?? 'Crew Member';
+    final String roleCode = (member['roleCode'] as String? ?? '').trim();
     final int id = member['id'] as int;
 
     return SizedBox(
@@ -204,38 +218,56 @@ class _CrewDataState extends State<CrewData> {
       child: Stack(
         alignment: Alignment.centerLeft,
         children: [
-          // BOTÓN PRINCIPAL
-          ButtonStyles.infoButtonOne(
-            context: context,
-            label: label,
-            onTap: widget.pickMode
-                ? () {
-                    // Modo selección: devolvemos el miembro
-                    if (Navigator.canPop(context)) {
-                      Navigator.pop(context, member);
+          // BOTÓN PRINCIPAL (sin locked -> sin candado)
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onLongPress: (!widget.pickMode)
+                ? () => _confirmDeleteCrew(context, id, index)
+                : null,
+            child: ButtonStyles.infoButtonOne(
+              context: context,
+              label: baseName,
+              onTap: widget.pickMode
+                  ? () {
+                      if (Navigator.canPop(context)) {
+                        Navigator.pop(context, member);
+                      }
                     }
-                  }
-                : () => _openCrewFile(crewId: id),
-            leftIconAsset: 'assets/icons/crew.svg',
-            locked: false,
+                  : () => _openCrewFile(crewId: id),
+              leftIconAsset: 'assets/icons/crew.svg',
+            ),
           ),
 
-          // Icono erase dentro del botón (solo en modo normal)
-          if (!widget.pickMode)
+          // PILL DEL ROL A LA DERECHA
+          if (roleCode.isNotEmpty)
             Positioned(
-              right: 80,
+              right: 14,
               top: 0,
               bottom: 0,
               child: Center(
-                child: GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onTap: () => _confirmDeleteCrew(context, id, index),
-                  child: SvgPicture.asset(
-                    'assets/icons/erase.svg',
-                    height: 18,
-                    colorFilter: const ColorFilter.mode(
-                      Colors.white,
-                      BlendMode.srcIn,
+                child: IgnorePointer(
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: AppColors.teal2,
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(
+                        color: Colors.white.withOpacity(0.70),
+                        width: 0.5,
+                      ),
+                    ),
+                    constraints: const BoxConstraints(maxWidth: 110),
+                    child: Text(
+                      roleCode,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                        fontSize: 16,
+                        letterSpacing: 0.6,
+                      ),
                     ),
                   ),
                 ),
@@ -257,10 +289,12 @@ class _CrewDataState extends State<CrewData> {
 
     await showPopWindow(
       context: context,
-      title: l.t("delete_crew_member"),
+      // antes: delete_crew_member
+      title: l.t("confirm_delete_title"),
       children: [
         Text(
-          l.t("are_you_sure_you_want_to_delete_this_crew_member"),
+          // antes: are_you_sure_you_want_to_delete_this_crew_member
+          l.t("confirm_delete_message"),
           style: AppTextStyles.body,
         ),
         const SizedBox(height: 16),

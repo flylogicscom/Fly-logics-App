@@ -14,7 +14,6 @@ import 'package:fly_logicd_logbook_app/common/app_colors.dart';
 import 'package:fly_logicd_logbook_app/l10n/app_localizations.dart';
 import 'package:fly_logicd_logbook_app/utils/db_helper.dart';
 import 'package:fly_logicd_logbook_app/features/airplanes/airplaneslist.dart';
-import 'package:fly_logicd_logbook_app/features/logs/logs_pagelist.dart';
 import 'package:fly_logicd_logbook_app/features/profile/pilot_data.dart';
 import 'package:fly_logicd_logbook_app/features/profile/crew_data.dart';
 
@@ -324,6 +323,11 @@ class _NewFlightPageState extends State<NewFlightPage> {
     return CrewRoleSelection(code: code, name: code, description: '');
   }
 
+  // Alias de compatibilidad: algunos loaders usan este nombre.
+  CrewRoleSelection _crewRoleFromCode(AppLocalizations l, String codeRaw) {
+    return _roleFromCode(l, codeRaw);
+  }
+
   Future<void> _loadExistingFlight() async {
     if (widget.flightId == null) return;
 
@@ -356,6 +360,185 @@ class _NewFlightPageState extends State<NewFlightPage> {
         } else {
           _loadedDataJson = Map<String, dynamic>.from(snap);
         }
+      }
+
+      // ================== CARGA PREFERENTE DESDE COLUMNAS (schema nuevo) ==================
+      // Si el vuelo fue guardado con columnas planas (sin dataJson), preferimos estas columnas.
+      final bool hasNewCrewCols =
+          row.containsKey('rangoPilot') || row.containsKey('pilotName');
+      final bool hasNewTimeCols = row.containsKey('useUtcTime') ||
+          row.containsKey('timeStartCtrl') ||
+          row.containsKey('timeEndCtrl');
+      final bool hasNewAircraftCol = row.containsKey('aircraftItemId');
+
+      if (hasNewCrewCols || hasNewTimeCols || hasNewAircraftCol) {
+        // Dates
+        DateTime begin2 = _flightBeginDate;
+        DateTime end2 = _flightEndDate;
+
+        final int startMs2 = (row['startDate'] as int?) ?? 0;
+        if (startMs2 > 0) {
+          begin2 = DateTime.fromMillisecondsSinceEpoch(startMs2);
+        }
+
+        final int endMs2 = (row['endDate'] as int?) ?? 0;
+        if (endMs2 > 0) {
+          end2 = DateTime.fromMillisecondsSinceEpoch(endMs2);
+        }
+
+        // Route
+        final String from2 =
+            (row['fromIcao'] ?? '').toString().trim().toUpperCase();
+        final String to2 =
+            (row['toIcao'] ?? '').toString().trim().toUpperCase();
+
+        // Time mode
+        bool useUtc2 = false;
+        final Object? useUtcRaw2 = row['useUtcTime'];
+        if (useUtcRaw2 is int) useUtc2 = useUtcRaw2 != 0;
+        if (useUtcRaw2 is bool) useUtc2 = useUtcRaw2;
+
+        final String tStart2 = (row['timeStartCtrl'] ?? '').toString();
+        final String tEnd2 = (row['timeEndCtrl'] ?? '').toString();
+
+        // Crew 1..3
+        final l = AppLocalizations.of(context);
+
+        _CrewEntry makeCrewEntry(String code, String name) {
+          return _CrewEntry(
+            role: _crewRoleFromCode(l, code),
+            name: name,
+          );
+        }
+
+        final String rp1 =
+            (row['rangoPilot'] ?? row['pic'] ?? 'PIC').toString();
+        final String pn1 = (row['pilotName'] ?? '').toString();
+        final String rp2 = (row['rangoPilot2'] ?? '').toString();
+        final String pn2 = (row['pilotName2'] ?? '').toString();
+        final String rp3 = (row['rangoPilot3'] ?? '').toString();
+        final String pn3 = (row['pilotName3'] ?? '').toString();
+
+        final List<_CrewEntry> crew2 = <_CrewEntry>[];
+        if (rp1.trim().isNotEmpty || pn1.trim().isNotEmpty) {
+          crew2.add(makeCrewEntry(rp1, pn1));
+        }
+        if (rp2.trim().isNotEmpty || pn2.trim().isNotEmpty) {
+          crew2.add(makeCrewEntry(rp2, pn2));
+        }
+        if (rp3.trim().isNotEmpty || pn3.trim().isNotEmpty) {
+          crew2.add(makeCrewEntry(rp3, pn3));
+        }
+
+        // Aircraft
+        _SelectedAircraftSummary? aircraft2;
+        final int? aid2 = row['aircraftItemId'] as int?;
+        if (aid2 != null) {
+          aircraft2 = await _loadAircraftSummary(aid2);
+        }
+
+        // Notes
+        final String remarks2 = (row['remarks'] ?? '').toString();
+        final String tagsStr2 = (row['tags'] ?? '').toString();
+
+        List<String> tags2 = <String>[];
+        if (tagsStr2.trim().isNotEmpty) {
+          try {
+            final decoded = jsonDecode(tagsStr2);
+            if (decoded is List) {
+              tags2 = decoded.map((e) => e.toString()).toList(growable: false);
+            }
+          } catch (_) {}
+        }
+
+        // SECTION 08-11 (columnas planas)
+        final int blockMin2 = (row['blockTimeMinutes'] as int?) ?? 0;
+        int totalCenti2 = (row['totalFlightCenti'] as int?) ?? 0;
+        if (totalCenti2 <= 0 && blockMin2 > 0) {
+          totalCenti2 = ((blockMin2 / 60.0) * 100).round();
+        }
+
+        final int dayCenti2 = (row['condDayCenti'] as int?) ?? 0;
+        final int nightCenti2 = (row['condNightCenti'] as int?) ?? 0;
+        final int ifrCenti2 = (row['condIFRCenti'] as int?) ?? 0;
+
+        final int ttCrossCenti2 = (row['timeCrossCountryCenti'] as int?) ?? 0;
+        final int ttSoloCenti2 = (row['timeSoloCenti'] as int?) ?? 0;
+        final int ttPicCenti2 = (row['timePICCenti'] as int?) ?? 0;
+        final int ttSicCenti2 = (row['timeSICCenti'] as int?) ?? 0;
+        final int ttInstReCenti2 =
+            (row['timeInstructionRecCenti'] as int?) ?? 0;
+        final int ttFlyInstCenti2 = (row['timeInstructorCenti'] as int?) ?? 0;
+
+        final int tkofDay2 = (row['takeoffsDay'] as int?) ?? 0;
+        final int tkofNight2 = (row['takeoffsNight'] as int?) ?? 0;
+        final int ldgDay2 = (row['landingsDay'] as int?) ?? 0;
+        final int ldgNight2 = (row['landingsNight'] as int?) ?? 0;
+
+        final int appCount2 = (row['approachesNumber'] as int?) ?? 0;
+        String? appType2;
+        final Object? appTypeRaw2 = row['approachesType'];
+        if (appTypeRaw2 != null) {
+          final String s = appTypeRaw2.toString().trim();
+          if (s.isNotEmpty) appType2 = s;
+        }
+
+        setState(() {
+          _flightBeginDate = begin2;
+          _flightEndDate = end2;
+
+          _fromIcaoCtrl.text = from2;
+          _toIcaoCtrl.text = to2;
+
+          _useUtcTime = useUtc2;
+          _timeStartCtrl.text = tStart2;
+          _timeEndCtrl.text = tEnd2;
+
+          if (aircraft2 != null) _selectedAircraft = aircraft2;
+
+          if (crew2.isNotEmpty) {
+            _crewEntries
+              ..clear()
+              ..addAll(crew2);
+          }
+
+          _remarksCtrl.text = remarks2;
+          _remarkTags
+            ..clear()
+            ..addAll(tags2);
+
+          // SECTION 08
+          _setCentiCtrl(_condDayCtrl, dayCenti2);
+          _setCentiCtrl(_condNightCtrl, nightCenti2);
+          _setCentiCtrl(_condIfrCtrl, ifrCenti2);
+
+          // Flags para que no se reescriban valores cargados por recalculo
+          _condDayTouched = (dayCenti2 != totalCenti2) || (nightCenti2 != 0);
+          _condNightTouched = (nightCenti2 != 0);
+          _condIfrTouched = (ifrCenti2 != 0);
+          _condLastEdited = _CondLastEdited.day;
+
+          // SECTION 09
+          _setCentiCtrl(_ttCrossCtrl, ttCrossCenti2);
+          _setCentiCtrl(_ttSoloCtrl, ttSoloCenti2);
+          _setCentiCtrl(_ttPicCtrl, ttPicCenti2);
+          _setCentiCtrl(_ttSicCtrl, ttSicCenti2);
+          _setCentiCtrl(_ttInstReCtrl, ttInstReCenti2);
+          _setCentiCtrl(_ttFlyInstCtrl, ttFlyInstCenti2);
+
+          // SECTION 10
+          _setIntCtrl(_tkofDayCtrl, tkofDay2);
+          _setIntCtrl(_tkofNightCtrl, tkofNight2);
+          _setIntCtrl(_ldgDayCtrl, ldgDay2);
+          _setIntCtrl(_ldgNightCtrl, ldgNight2);
+
+          // SECTION 11
+          _setIntCtrl(_approachCountCtrl, appCount2);
+          _approachType = appType2;
+        });
+
+        _onFlightTimeChanged();
+        return;
       }
 
       // --- Dates (fallback a columnas si no hay JSON)
@@ -837,7 +1020,7 @@ class _NewFlightPageState extends State<NewFlightPage> {
   }
 
   Future<void> _addNewCrewEntry() async {
-    if (_crewEntries.length >= 4) return;
+    if (_crewEntries.length >= 3) return;
 
     final _CrewEntry? entry = await _showCrewEntryDialog();
     if (entry == null) return;
@@ -1147,265 +1330,224 @@ class _NewFlightPageState extends State<NewFlightPage> {
 
   // ================== SAVE ==================
 
-  Future<void> _saveFlight() async {
-    final l = AppLocalizations.of(context);
+  // ... (dentro de _NewFlightPageState)
 
+  Future<void> _saveFlight() async {
     if (_saving) return;
     setState(() => _saving = true);
 
     try {
-      final int nowMs = DateTime.now().millisecondsSinceEpoch;
+      final db = await DBHelper.getDB();
 
-      final String fromIcao = _fromIcaoCtrl.text.trim().toUpperCase();
-      final String toIcao = _toIcaoCtrl.text.trim().toUpperCase();
+      // ================== SECTION 04: CREW (hasta 3) ==================
+      // Tripulación: se guarda nombre y rango (hasta 3 miembros).
+      // En el proyecto no existe tabla 'crew_members' en DBHelper; por compat usamos la tabla 'pilot'.
+      // ignore: unused_element
+      Future<Map<String, Object?>?> findPilotByName(String name) async {
+        final n = name.trim();
+        if (n.isEmpty) return null;
+        final rows = await db.query(
+          'pilot',
+          where: 'displayName = ? OR name = ?',
+          whereArgs: <Object>[n, n],
+          limit: 1,
+        );
+        return rows.isNotEmpty ? rows.first : null;
+      }
 
-      final String fromFlagEmoji = _flagForIcao(fromIcao);
-      final String toFlagEmoji = _flagForIcao(toIcao);
+      // Piloto principal: si hay piloto en tabla pilot, úsalo como base.
+      final Map<String, dynamic>? pilotRow = await DBHelper.getPilot();
+      final String pilotNameMainBase =
+          ((pilotRow?['displayName'] ?? pilotRow?['name'])?.toString() ?? '')
+              .trim();
 
-      // Evita el error: double? -> double
-      final double blockHoursRaw = _blockTimeHours ?? 0.0;
+      // Extraer hasta 3 entradas desde UI
+      final _CrewEntry? c1 = _crewEntries.isNotEmpty ? _crewEntries[0] : null;
+      final _CrewEntry? c2 = _crewEntries.length > 1 ? _crewEntries[1] : null;
+      final _CrewEntry? c3 = _crewEntries.length > 2 ? _crewEntries[2] : null;
 
-// Normaliza a centésimas (ej: 1,25) para que guardado/carga/estadísticas sean consistentes
-      final int totalCenti = (blockHoursRaw * 100).round();
-      final double blockHours = totalCenti / 100.0;
-      final int blockTimeMinutes = (blockHours * 60).round();
-      final String blockTimeText = _centiToText(totalCenti);
+      final String rangoPilot1 =
+          (c1?.role.code.toString() ?? 'PIC').trim().toUpperCase();
+      final String rangoPilot2 =
+          (c2?.role.code.toString() ?? '').trim().toUpperCase();
+      final String rangoPilot3 =
+          (c3?.role.code.toString() ?? '').trim().toUpperCase();
 
-// PIC (para filtros): PIC / COM / INS cuentan como piloto al mando
-      String firstByRole(String roleCode) {
-        for (final e in _crewEntries) {
-          if (e.role.code.trim().toUpperCase() == roleCode) {
-            final n = e.name.trim();
-            if (n.isNotEmpty) return n;
+      // Nombres (preferir texto de UI; si vacío, usar pilot table)
+      final String pilotName1 = (c1?.name.trim().isNotEmpty ?? false)
+          ? c1!.name.trim()
+          : pilotNameMainBase;
+
+      final String pilotName2 = c2?.name.trim() ?? '';
+      final String pilotName3 = c3?.name.trim() ?? '';
+
+      // ================== SECTION 02: AIRCRAFT (solo id) ==================
+      final int? aircraftItemId = _selectedAircraft?.id;
+
+      // ================== SECTION 05: TIME MODE (UTC vs horómetro) ==================
+      final int useUtcTime = _useUtcTime ? 1 : 0;
+      final String timeStartText = _timeStartCtrl.text.trim();
+      final String timeEndText = _timeEndCtrl.text.trim();
+
+      // ================== SECTION 05: TOTALS ==================
+      final int totalFlightCenti = _totalCentiFromSection5();
+
+      // ================== SECTION 06/07: DERIVADO DE aircraft_items.typeTitle ==================
+      int singleEngineCenti = 0;
+      int multiEngineCenti = 0;
+      int turbopropCenti = 0;
+      int turbojetCenti = 0;
+      int lsaCenti = 0;
+      int helicopterCenti = 0;
+      int gliderCenti = 0;
+      int otherAircraftCenti = 0;
+      int simulatorCenti = 0;
+
+      if (aircraftItemId != null) {
+        final a = await _loadAircraftSummary(aircraftItemId);
+        final bool isSim = a?.isSimulator ?? false;
+        final List<String> titles = (a?.typeTitles ?? <String>[])
+            .map((e) => e.trim().toUpperCase())
+            .where((e) => e.isNotEmpty)
+            .toList(growable: false);
+
+        if (isSim) {
+          simulatorCenti = totalFlightCenti;
+        } else {
+          // Motor principal (no duplicar total en múltiples columnas)
+          final String joined = titles.join('|');
+          if (joined.contains('MULTI') ||
+              joined.contains('ME') ||
+              joined.contains('MULTIMOTOR')) {
+            multiEngineCenti = totalFlightCenti;
+          } else if (joined.contains('TURBOPROP') || joined.contains('TP')) {
+            turbopropCenti = totalFlightCenti;
+          } else if (joined.contains('TURBOJET') ||
+              joined.contains('JET') ||
+              joined.contains('TJ')) {
+            turbojetCenti = totalFlightCenti;
+          } else if (joined.contains('HELI') || joined.contains('HELICOPTER')) {
+            helicopterCenti = totalFlightCenti;
+          } else if (joined.contains('GLIDER') || joined.contains('PLANADOR')) {
+            gliderCenti = totalFlightCenti;
+          } else if (joined.contains('SINGLE') ||
+              joined.contains('SE') ||
+              joined.contains('MONO') ||
+              joined.contains('MONOMOTOR')) {
+            singleEngineCenti = totalFlightCenti;
+          } else {
+            otherAircraftCenti = totalFlightCenti;
+          }
+
+          // LSA como etiqueta adicional (puede solapar con single engine)
+          if (joined.contains('LSA')) {
+            lsaCenti = totalFlightCenti;
           }
         }
-        return '';
       }
 
-      String pic = firstByRole('PIC');
-      if (pic.isEmpty) pic = firstByRole('COM');
-      if (pic.isEmpty) pic = firstByRole('INS');
+      // ================== MAPA FINAL (solo columnas mínimas esenciales) ==================
+      final Map<String, Object?> flightMap = <String, Object?>{
+        // id: autoincrement
 
-      final bool isSim = (_selectedAircraft?.isSimulator ?? false) ||
-          fromIcao == 'SIM' ||
-          toIcao == 'SIM';
+        // Sección 1
+        'startDate': _flightBeginDate.millisecondsSinceEpoch,
+        'endDate': _flightEndDate.millisecondsSinceEpoch,
 
-      final String aircraftRegistration =
-          isSim ? 'SIM' : (_selectedAircraft?.registration.trim() ?? '');
+        // Sección 2
+        'aircraftItemId': aircraftItemId,
 
-      final String aircraftIdentifier =
-          _selectedAircraft?.identifier.trim() ?? '';
+        // Sección 3
+        'fromIcao': _fromIcaoCtrl.text.trim().toUpperCase(),
+        'toIcao': _toIcaoCtrl.text.trim().toUpperCase(),
 
-      final int startDateMs = DateTime(
-        _flightBeginDate.year,
-        _flightBeginDate.month,
-        _flightBeginDate.day,
-      ).millisecondsSinceEpoch;
+        // Sección 4 (crew 1..3)
+        'rangoPilot': rangoPilot1,
+        // Nota: pilotId/pilotId2/pilotId3 eliminados (schema v12).
+        // Nota: pilotId/pilotId2/pilotId3 eliminados (schema v12).
+        'pilotName': pilotName1.isEmpty ? null : pilotName1,
+        'rangoPilot2': rangoPilot2.isEmpty ? null : rangoPilot2,
+        'pilotName2': pilotName2.isEmpty ? null : pilotName2,
+        'rangoPilot3': rangoPilot3.isEmpty ? null : rangoPilot3,
+        'pilotName3': pilotName3.isEmpty ? null : pilotName3,
 
-      final int endDateMs = DateTime(
-        _flightEndDate.year,
-        _flightEndDate.month,
-        _flightEndDate.day,
-      ).millisecondsSinceEpoch;
+        // Sección 5
+        'blockTimeMinutes':
+            (_blockTimeHours != null) ? (_blockTimeHours! * 60).round() : 0,
+        'useUtcTime': useUtcTime,
+        'timeStartCtrl': timeStartText.isEmpty ? null : timeStartText,
+        'timeEndCtrl': timeEndText.isEmpty ? null : timeEndText,
+        'blockTimeText': (_blockTimeHours != null)
+            ? _formatBlockTime(_blockTimeHours!)
+            : null,
+        'totalFlightCenti': totalFlightCenti,
 
-      // Normaliza textos centésimas (permite que el usuario haya escrito "1,5" o "1.50")
-      final int condDayCenti = _parseCentiText(_condDayCtrl.text);
-      final int condNightCenti = _parseCentiText(_condNightCtrl.text);
-      final int condIfrCenti = _parseCentiText(_condIfrCtrl.text);
+        // Sección 6
+        'singleEngineCenti': singleEngineCenti,
+        'multiEngineCenti': multiEngineCenti,
+        'turbopropCenti': turbopropCenti,
+        'turbojetCenti': turbojetCenti,
+        'lsaCenti': lsaCenti,
+        'helicopterCenti': helicopterCenti,
+        'gliderCenti': gliderCenti,
+        'otherAircraftCenti': otherAircraftCenti,
 
-      final int ttCrossCenti = _parseCentiText(_ttCrossCtrl.text);
-      final int ttSoloCenti = _parseCentiText(_ttSoloCtrl.text);
-      final int ttPicCenti = _parseCentiText(_ttPicCtrl.text);
-      final int ttSicCenti = _parseCentiText(_ttSicCtrl.text);
-      final int ttInstReCenti = _parseCentiText(_ttInstReCtrl.text);
-      final int ttFlyInstCenti = _parseCentiText(_ttFlyInstCtrl.text);
+        // Sección 7
+        'simulatorCenti': simulatorCenti,
 
-      // Snapshot completo (puedes ampliar sin tocar el esquema)
-      final Map<String, dynamic> dataJson = <String, dynamic>{
-        'conditions': <String, dynamic>{
-          // formato visible (texto)
-          'day': _centiToText(condDayCenti),
-          'night': _centiToText(condNightCenti),
-          'ifr': _centiToText(condIfrCenti),
+        // Sección 8
+        'condDayCenti': _parseCentiText(_condDayCtrl.text),
+        'condNightCenti': _parseCentiText(_condNightCtrl.text),
+        'condIFRCenti': _parseCentiText(_condIfrCtrl.text),
 
-          // numérico estable para estadísticas/export
-          'dayCenti': condDayCenti,
-          'nightCenti': condNightCenti,
-          'ifrCenti': condIfrCenti,
+        // Sección 9
+        'timeCrossCountryCenti': _parseCentiText(_ttCrossCtrl.text),
+        'timeSoloCenti': _parseCentiText(_ttSoloCtrl.text),
+        'timePICCenti': _parseCentiText(_ttPicCtrl.text),
+        'timeSICCenti': _parseCentiText(_ttSicCtrl.text),
+        'timeInstructionRecCenti': _parseCentiText(_ttInstReCtrl.text),
+        'timeInstructorCenti': _parseCentiText(_ttFlyInstCtrl.text),
 
-          // (opcional pero útil) flags para reconstruir UI
-          'touched': <String, dynamic>{
-            'day': _condDayTouched,
-            'night': _condNightTouched,
-            'ifr': _condIfrTouched,
-            'lastEdited': _condLastEdited.name,
-          },
-        },
+        // Sección 10
+        'takeoffsDay': _parseIntText(_tkofDayCtrl.text),
+        'takeoffsNight': _parseIntText(_tkofNightCtrl.text),
+        'landingsDay': _parseIntText(_ldgDayCtrl.text),
+        'landingsNight': _parseIntText(_ldgNightCtrl.text),
 
-        'v': 1,
-        'dates': <String, dynamic>{
-          'begin': _flightBeginDate.toIso8601String(),
-          'end': _flightEndDate.toIso8601String(),
-        },
-        'route': <String, dynamic>{
-          'fromIcao': fromIcao,
-          'toIcao': toIcao,
-          'fromFlagEmoji': fromFlagEmoji,
-          'toFlagEmoji': toFlagEmoji,
-        },
-        'aircraft': _selectedAircraft == null
-            ? null
-            : <String, dynamic>{
-                'isSimulator': _selectedAircraft!.isSimulator,
-                'registration': _selectedAircraft!.registration,
-                'identifier': _selectedAircraft!.identifier,
-                'owner': _selectedAircraft!.owner,
-                'makeAndModel': _selectedAircraft!.makeAndModel,
-                'tags': _selectedAircraft!.tags,
-                'typeIds': _selectedAircraft!.typeIds,
-                'typeCustomLabel': _selectedAircraft!.typeCustomLabel,
-                'typeCustomDescription':
-                    _selectedAircraft!.typeCustomDescription,
-                'simCompany': _selectedAircraft!.simCompany,
-                'simAircraftModel': _selectedAircraft!.simAircraftModel,
-                'simLevel': _selectedAircraft!.simLevel,
-              },
-        'crew': <Map<String, dynamic>>[
-          for (final e in _crewEntries)
-            <String, dynamic>{
-              'role': e.role.code,
-              'name': e.name.trim(),
-            },
-        ],
-        'time': <String, dynamic>{
-          'useUtc': _useUtcTime,
-          'start': _timeStartCtrl.text.trim(),
-          'end': _timeEndCtrl.text.trim(),
-          'blockHours': blockHours,
-          'blockMinutes': blockTimeMinutes,
-        },
-// SECTION 09: Flight time types (nuevo esquema)
-        'typeTimes': <String, dynamic>{
-          _kTtCross: _centiToText(ttCrossCenti),
-          _kTtSolo: _centiToText(ttSoloCenti),
-          _kTtPic: _centiToText(ttPicCenti),
-          _kTtSic: _centiToText(ttSicCenti),
-          _kTtInstRe: _centiToText(ttInstReCenti),
-          _kTtFlyInst: _centiToText(ttFlyInstCenti),
+        // Sección 11
+        'approachesNumber': _parseIntText(_approachCountCtrl.text),
+        'approachesType': _approachType,
 
-          // numérico estable
-          '${_kTtCross}Centi': ttCrossCenti,
-          '${_kTtSolo}Centi': ttSoloCenti,
-          '${_kTtPic}Centi': ttPicCenti,
-          '${_kTtSic}Centi': ttSicCenti,
-          '${_kTtInstRe}Centi': ttInstReCenti,
-          '${_kTtFlyInst}Centi': ttFlyInstCenti,
-        },
-
-// SECTION 10: Takeoffs / Landings
-        'takeoffsLandings': <String, dynamic>{
-          'tkofDay': _parseIntText(_tkofDayCtrl.text),
-          'tkofNight': _parseIntText(_tkofNightCtrl.text),
-          'ldgDay': _parseIntText(_ldgDayCtrl.text),
-          'ldgNight': _parseIntText(_ldgNightCtrl.text),
-        },
-
-// SECTION 11: Approaches
-        'approaches': <String, dynamic>{
-          'count': _parseIntText(_approachCountCtrl.text),
-          'type': _approachType, // puede ser null
-        },
-
-// SECTION 12: Remarks + Tags
-        'remarks': <String, dynamic>{
-          'text': _remarksCtrl.text.trim(),
-          'tags': List<String>.from(_remarkTags),
-        },
-
-        'savedAt': nowMs,
+        // Sección 12
+        'remarks': _remarksCtrl.text.trim(),
+        'tags': jsonEncode(_remarkTags),
       };
 
-// Mantén claves futuras en dataJson al editar (shallow-merge por sección)
-      Map<String, dynamic> finalJson = dataJson;
-      if (_isEdit && _loadedDataJson != null) {
-        final base = Map<String, dynamic>.from(_loadedDataJson!);
-
-        void mergeSection(String key, Map<String, dynamic> newMap) {
-          final oldMap = (base[key] is Map)
-              ? Map<String, dynamic>.from(base[key] as Map)
-              : <String, dynamic>{};
-          base[key] = <String, dynamic>{...oldMap, ...newMap};
-        }
-
-        base['v'] = dataJson['v'];
-        mergeSection(
-            'dates', Map<String, dynamic>.from(dataJson['dates'] as Map));
-        mergeSection(
-            'route', Map<String, dynamic>.from(dataJson['route'] as Map));
-        mergeSection(
-            'aircraft', Map<String, dynamic>.from(dataJson['aircraft'] as Map));
-        base['crew'] = dataJson['crew'];
-        mergeSection(
-            'time', Map<String, dynamic>.from(dataJson['time'] as Map));
-        mergeSection('conditions',
-            Map<String, dynamic>.from(dataJson['conditions'] as Map));
-        mergeSection('typeTimes',
-            Map<String, dynamic>.from(dataJson['typeTimes'] as Map));
-        mergeSection('takeoffsLandings',
-            Map<String, dynamic>.from(dataJson['takeoffsLandings'] as Map));
-        mergeSection('approaches',
-            Map<String, dynamic>.from(dataJson['approaches'] as Map));
-        mergeSection(
-            'remarks', Map<String, dynamic>.from(dataJson['remarks'] as Map));
-
-        finalJson = base;
-      }
-
-      final Map<String, Object?> row = <String, Object?>{
-        'startDate': startDateMs,
-        'endDate': endDateMs,
-        'blockTimeMinutes': blockTimeMinutes,
-        'fromIcao': fromIcao,
-        'fromFlagEmoji': fromFlagEmoji,
-        'toIcao': toIcao,
-        'toFlagEmoji': toFlagEmoji,
-        'aircraftRegistration': aircraftRegistration,
-        'aircraftIdentifier': aircraftIdentifier,
-        'pic': pic,
-        'isSimulator': isSim ? 1 : 0,
-        'blockTimeText': blockTimeText,
-        'dataJson': jsonEncode(finalJson),
-
-        // createdAt/updatedAt los pone DBHelper
-      };
-
+      // Guardado (respeta timestamps)
       if (_isEdit && widget.flightId != null) {
-        await DBHelper.updateFlight(widget.flightId!, row);
+        await DBHelper.updateFlight(widget.flightId!, flightMap);
       } else {
-        await DBHelper.insertFlight(row);
+        await DBHelper.insertFlight(flightMap);
       }
 
       if (!mounted) return;
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l.t("flight_saved"))),
-      );
-      if (_isEdit) {
-        Navigator.pop(context, true);
-      } else {
-        Navigator.of(context).pushAndRemoveUntil(
-          MaterialPageRoute(builder: (_) => const LogsPageList()),
-          (route) => false,
-        );
-      }
+      Navigator.pop(context, true);
     } catch (e) {
       if (!mounted) return;
+      final l = AppLocalizations.of(context);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('${l.t("error")}: $e')),
       );
     } finally {
       if (mounted) setState(() => _saving = false);
     }
+  }
+
+// Función auxiliar para convertir el texto "0,00" a entero (centésimas)
+  int _parseCentiText(String text) {
+    if (text.isEmpty) return 0;
+    String clean = text.replaceAll(RegExp(r'[^0-9]'), '');
+    return int.tryParse(clean) ?? 0;
   }
 
   void _cancel() {
@@ -1817,6 +1959,7 @@ class _NewFlightPageState extends State<NewFlightPage> {
     });
   }
 
+  // ignore: unused_element  // mantenido por compatibilidad (helper usado en versiones anteriores)
   String _centiToText(int centi) {
     final int v = centi < 0 ? 0 : centi;
     final int intPart = v ~/ 100;
@@ -1824,11 +1967,15 @@ class _NewFlightPageState extends State<NewFlightPage> {
     return '$intPart,${decPart.toString().padLeft(2, '0')}';
   }
 
+/* Duplicado: _parseCentiText estaba definido dos veces en el mismo State y rompe compilación. Se deja comentado para mantener historial.
+
   int _parseCentiText(String text) {
     final String digits = text.replaceAll(RegExp(r'[^0-9]'), '');
     if (digits.isEmpty) return 0;
     return int.tryParse(digits) ?? 0;
   }
+
+*/
 
   void _setCentiCtrl(TextEditingController ctrl, int centi) {
     final int v = centi < 0 ? 0 : centi;
@@ -3475,7 +3622,7 @@ class _NewFlightPageState extends State<NewFlightPage> {
           ),
           const SizedBox(height: 8),
         ],
-        if (_crewEntries.length < 4)
+        if (_crewEntries.length < 3)
           Center(
             child: OutlinedButton(
               onPressed: _addNewCrewEntry,

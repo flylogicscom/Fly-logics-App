@@ -1,4 +1,4 @@
-// lib/features/profile/crew_datafile.dart
+//  lib/features/profile/crew_datafile.dart
 
 import 'package:flutter/material.dart';
 
@@ -626,51 +626,47 @@ class _CrewDataFileState extends State<CrewDataFile> {
   Future<void> _deleteCrew() async {
     final l = AppLocalizations.of(context);
 
-    final confirmed = await showDialog<bool>(
+    await showPopWindow(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(l.t("confirm_delete_title")),
-        content: Text(l.t("confirm_delete_message")),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text(l.t("cancel")),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text(
-              l.t("delete"),
-              style: const TextStyle(color: Colors.red),
-            ),
-          ),
-        ],
-      ),
+      title: l.t("delete_crew_member"),
+      children: [
+        Text(
+          l.t("are_you_sure_you_want_to_delete_this_crew_member"),
+        ),
+        const SizedBox(height: 16),
+        ButtonStyles.pillCancelSave(
+          onCancel: () => Navigator.pop(context),
+          onSave: () async {
+            Navigator.pop(context);
+
+            try {
+              final db = await DBHelper.getDB();
+              if (widget.crewId != null) {
+                await db.delete(
+                  _crewTable,
+                  where: 'id = ?',
+                  whereArgs: [widget.crewId],
+                );
+              }
+
+              if (!mounted) return;
+              Navigator.pop(context, true);
+            } catch (e, st) {
+              // ignore: avoid_print
+              print('Error deleting crew: $e');
+              // ignore: avoid_print
+              print(st);
+              if (!mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(l.t("error_deleting_data"))),
+              );
+            }
+          },
+          cancelLabel: l.t("cancel"),
+          saveLabel: l.t("delete"),
+        ),
+      ],
     );
-
-    if (confirmed != true) return;
-
-    try {
-      final db = await DBHelper.getDB();
-      if (widget.crewId != null) {
-        await db.delete(
-          _crewTable,
-          where: 'id = ?',
-          whereArgs: [widget.crewId],
-        );
-      }
-
-      if (!mounted) return;
-      Navigator.pop(context, true);
-    } catch (e, st) {
-      // ignore: avoid_print
-      print('Error deleting crew: $e');
-      // ignore: avoid_print
-      print(st);
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l.t("error_deleting_data"))),
-      );
-    }
   }
 
   // ---------- PAÍS ----------
